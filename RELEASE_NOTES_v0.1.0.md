@@ -21,6 +21,13 @@ e7e6d13c9a0dbf4343df283e2a18ffa451454c5cad928938498131cd627bbc40  Albikirc-macOS
 ee0c0c9ffb1d86d0bdb40c8c0066d8e5889c9975d1c62117861c2cb95ac0450d  Albikirc-macOS-arm64.dmg
 ```
 
+To verify on macOS:
+
+```
+shasum -a 256 ~/Downloads/Albikirc-macOS-arm64.zip
+shasum -a 256 ~/Downloads/Albikirc-macOS-arm64.dmg
+```
+
 Note: An Intel (x86_64) build can be produced on an Intel Mac or on Apple Silicon using Rosetta with an x86_64 Python. If needed, we’ll add it to this release.
 
 ## Install
@@ -39,4 +46,3 @@ xattr -dr com.apple.quarantine /Applications/Albikirc.app
 
 ## Credits
 Licensed under Apache‑2.0. See `LICENSE`.
-
