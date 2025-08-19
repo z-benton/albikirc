@@ -1,0 +1,29 @@
+[project]
+name = "albikirc"
+version = "0.1.0"
+description = "Minimal, accessible IRC client using wxPython"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "wxPython",
+]
+license = { file = "LICENSE" }
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: OS Independent",
+]
+
+[project.scripts]
+albikirc = "albikirc.app:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true

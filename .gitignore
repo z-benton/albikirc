@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.venv310/
+.venv-build/
+
+# macOS
+.DS_Store
+*.DS_Store
+._*
+
+# Python packaging
+dist/
+build/
+*.egg-info/
+*.spec
+Albikirc.spec
+.pyinstaller-cache/
+.home/
+
+# Linters / type checkers / tests
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+coverage.xml
+.coverage*
+htmlcov/
+
+# Editors/IDE
+.vscode/
+.idea/
+*.iml
+
+# Logs
+*.log
