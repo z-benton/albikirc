@@ -100,13 +100,11 @@ The following creates an isolated virtual environment, installs dependencies, an
 
 ## Next Steps
 - Add per‑server and identity preferences
-- Persist window/tab state
 - Theming and message formatting
   
 Implemented in this version: window/tab restore, timestamps, minimal theme, and direct messages via /msg, /query, or user list double‑click.
 
-## SwiftUI Version
-- A SwiftUI learning implementation lives in `swift_ui_albikirc/` with a minimal IRC client, accessible UI, and Preferences. See `swift_ui_albikirc/README.md` for setup instructions (Xcode, macOS).
+<!-- SwiftUI prototype not included in this repo; section removed to avoid confusion. -->
 
 ## Notes
 - The client implements a simple threaded IRC engine with optional TLS.

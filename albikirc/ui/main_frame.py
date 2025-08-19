@@ -670,7 +670,6 @@ class MainFrame(wx.Frame):
                             self.settings['servers'] = servers
                 except Exception:
                     pass
-                from ..config import save
                 save(self.settings)
                 self.SetStatusText(f"Connecting to {host}:{port} as {nick}{' with TLS' if use_tls else ''}")
         dlg.Destroy()
@@ -728,7 +727,6 @@ class MainFrame(wx.Frame):
                             servers.append({'name': name, 'host': host, 'port': int(port), 'use_tls': tls, 'nick': s.get('nick','')})
                             added += 1
                     self.settings['servers'] = servers
-                    from ..config import save
                     save(self.settings)
                     self._on_irc_status(f"Imported {added} server(s) from {path}")
                 except Exception as e:
