@@ -10,6 +10,7 @@ A minimal, accessible IRC client using wxPython. Focused on VoiceOver (macOS) an
 - IRC client with basic IRCv3 tag parsing, CTCP handling, JOIN/PART/NICK/QUIT events, and user list updates
 - Connect dialog with labeled fields (host, port, nick, TLS, optional SASL and client cert)
 - Slash commands: /join, /part, /nick, /me, /msg, /query, /quit, /notice, /topic, /whois, /raw
+- Event bus for decoupling UI and IRC client
 
 ## Requirements
 - Python 3.10 or newer
@@ -136,7 +137,7 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
 
 ## Slash Commands
 
-- `/join <#channel>` — Join a channel. Alias: `/j`
+- `/join <#channel> [key]` — Join a channel, optionally with a key. Alias: `/j`
 - `/part [#channel] [reason]` — Leave the current or given channel. Alias: `/p`
 - `/nick <newnick>` — Change your nickname.
 - `/me <action>` — Send an action to the current tab (echoed as `* <your-nick> action`).

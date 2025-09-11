@@ -8,6 +8,7 @@ from .connect_dialog import ConnectDialog
 from .preferences_dialog import PreferencesDialog
 from .saved_servers_dialog import SavedServersDialog
 from .help_dialog import HelpDialog
+from ..event_bus import event_bus
 
 
 class MainFrame(wx.Frame):
@@ -49,7 +50,7 @@ class MainFrame(wx.Frame):
             pass
         # Note: receive beeps are handled on each incoming message in _on_irc_message
 
-        self._bind_irc_events()
+        self._bind_events()
 
         self._make_menu()
         self._make_body()
@@ -618,11 +619,10 @@ class MainFrame(wx.Frame):
         ]
         self.SetAcceleratorTable(wx.AcceleratorTable(entries))
 
-    # IRC stub wiring
-    def _bind_irc_events(self):
-        self.irc.on_status = lambda text: wx.CallAfter(self._on_irc_status, text)
-        self.irc.on_message = lambda target, sender, text: wx.CallAfter(self._on_irc_message, target, sender, text)
-        self.irc.on_users = lambda target, users: wx.CallAfter(self._on_irc_users, target, users)
+    def _bind_events(self):
+        event_bus.subscribe("irc.status", lambda text: wx.CallAfter(self._on_irc_status, text))
+        event_bus.subscribe("irc.message", lambda target, sender, text: wx.CallAfter(self._on_irc_message, target, sender, text))
+        event_bus.subscribe("irc.users", lambda target, users: wx.CallAfter(self._on_irc_users, target, users))
 
     # Event handlers
     def _on_connect(self, evt):
@@ -675,12 +675,15 @@ class MainFrame(wx.Frame):
         dlg.Destroy()
 
     def _on_join_channel(self, evt):
-        dlg = wx.TextEntryDialog(self, "Enter channel (e.g. #python)", "Join Channel")
+        dlg = wx.TextEntryDialog(self, "Enter channel and key (e.g. #channel key)", "Join Channel")
         dlg.SetName("Join channel dialog")
         if dlg.ShowModal() == wx.ID_OK:
-            channel = dlg.GetValue().strip()
-            if channel:
-                self.irc.join_channel(channel)
+            value = dlg.GetValue().strip()
+            if value:
+                parts = value.split(None, 1)
+                channel = parts[0]
+                key = parts[1] if len(parts) > 1 else None
+                self.irc.join_channel(channel, key)
                 self._chat_for_target(channel, create=True)
         dlg.Destroy()
 
@@ -1033,155 +1036,165 @@ class MainFrame(wx.Frame):
                 return
             cmd = parts[0].lower()
             arg = parts[1] if len(parts) > 1 else ""
-            if cmd in ("j", "join"):
-                chan = arg.strip()
-                if chan:
-                    self.irc.join_channel(chan)
-                    self._chat_for_target(chan, create=True)
-                return
-            if cmd in ("p", "part"):
-                # PART current or specified channel
-                chan = arg.strip() or target
-                if chan.lower().startswith('#') or chan.lower().startswith('&'):
-                    reason = ""
-                    if ' ' in arg:
-                        chan, reason = arg.split(' ', 1)
-                    self.irc._send_raw(f"PART {chan}{(' :' + reason) if reason else ''}")
-                return
-            if cmd == "nick":
-                new = arg.strip()
-                if new:
-                    self.irc._send_raw(f"NICK {new}")
-                return
-            if cmd == "me":
-                act = arg.strip()
-                if act:
-                    # Echo as "* <nick> action" to match incoming ACTION format
-                    nick = self.irc.nick or self.settings.get('nick', 'me')
-                    chat.append_message(f"* {nick} {act}")
-                    self.irc.send_action(target, act)
-                    # Consistent send feedback (sound/beep)
-                    try:
-                        snd_cfg = self.settings.get('sounds', {})
-                        if snd_cfg.get('enabled'):
-                            self._play_sound(snd_cfg.get('message_sent', ''))
-                    except Exception:
-                        pass
-                    try:
-                        if self._beeps_enabled:
-                            self._play_beep('send')
-                    except Exception:
-                        pass
-                return
-            if cmd == "notice":
-                if not arg:
-                    self._on_irc_status("Usage: /notice <target> <text>")
-                    return
-                a = arg.split(None, 1)
-                tgt = a[0]
-                msg = a[1] if len(a) > 1 else ""
-                if not msg:
-                    self._on_irc_status("Usage: /notice <target> <text>")
-                    return
-                # Route echo to the target tab for consistency
-                dest = self._chat_for_target(tgt, create=True)
-                dest.append_message(f"me: [notice] {msg}")
-                self.irc.send_notice(tgt, msg)
-                # Consistent send feedback (sound/beep)
-                try:
-                    snd_cfg = self.settings.get('sounds', {})
-                    if snd_cfg.get('enabled'):
-                        self._play_sound(snd_cfg.get('message_sent', ''))
-                except Exception:
-                    pass
-                try:
-                    if self._beeps_enabled:
-                        self._play_beep('send')
-                except Exception:
-                    pass
-                return
-            if cmd == "topic":
-                # Forms:
-                #  - /topic                → query current channel
-                #  - /topic <#chan>        → query given channel
-                #  - /topic <text>         → set current channel topic
-                #  - /topic <#chan> <text> → set given channel topic
-                arg_s = arg.strip()
-                if not arg_s:
-                    if target.startswith('#') or target.startswith('&'):
-                        self.irc.set_topic(target, None)
-                    else:
-                        self._on_irc_status("Usage: /topic [#channel] [text]")
-                    return
-                if arg_s.startswith('#') or arg_s.startswith('&'):
-                    # Could be just channel (query) or channel + text
-                    if ' ' in arg_s:
-                        chan, text = arg_s.split(' ', 1)
-                        self.irc.set_topic(chan, text)
-                    else:
-                        self.irc.set_topic(arg_s, None)
-                    return
-                # Otherwise, treat as text for current channel
-                if target.startswith('#') or target.startswith('&'):
-                    self.irc.set_topic(target, arg_s)
-                else:
-                    self._on_irc_status("Usage: /topic [#channel] [text]")
-                return
-            if cmd == "whois":
-                nick = arg.strip()
-                if not nick:
-                    # If current tab is PM, default to that nick
-                    if not (target.startswith('#') or target.startswith('&')):
-                        nick = target
-                if not nick:
-                    self._on_irc_status("Usage: /whois <nick>")
-                    return
-                self.irc.whois(nick)
-                return
-            if cmd == "raw":
-                raw = arg
-                if not raw:
-                    self._on_irc_status("Usage: /raw <line>")
-                    return
-                self.irc.send_raw(raw)
-                return
-            if cmd in ("msg", "query", "pm"):
-                if not arg:
-                    return
-                a = arg.split(None, 1)
-                nick = a[0]
-                msg = a[1] if len(a) > 1 else ""
-                pm = self._chat_for_target(nick, create=True)
-                if msg:
-                    pm.append_message(f"me: {msg}")
-                    self.irc.send_message(nick, msg)
-                    # Consistent send feedback (sound/beep)
-                    try:
-                        snd_cfg = self.settings.get('sounds', {})
-                        if snd_cfg.get('enabled'):
-                            self._play_sound(snd_cfg.get('message_sent', ''))
-                    except Exception:
-                        pass
-                    try:
-                        if self._beeps_enabled:
-                            self._play_beep('send')
-                    except Exception:
-                        pass
-                else:
-                    pm.focus_input()
-                return
-            if cmd == "quit":
-                reason = arg.strip() or "Bye"
-                try:
-                    self.irc._send_raw(f"QUIT :{reason}")
-                except Exception:
-                    pass
-                self.Close()
-                return
-            # Unknown command
-            self._on_irc_status(f"Unknown command: /{cmd}")
+
+            command_handler = getattr(self, f"_handle_slash_{cmd}", None)
+            if command_handler:
+                command_handler(target, chat, arg)
+            else:
+                self._on_irc_status(f"Unknown command: /{cmd}")
         except Exception as e:
             self._on_irc_status(f"Command error: {e}")
+
+    def _handle_slash_j(self, target, chat, arg):
+        self._handle_slash_join(target, chat, arg)
+
+    def _handle_slash_join(self, target, chat, arg):
+        chan = arg.strip()
+        if chan:
+            self.irc.join_channel(chan)
+            self._chat_for_target(chan, create=True)
+
+    def _handle_slash_p(self, target, chat, arg):
+        self._handle_slash_part(target, chat, arg)
+
+    def _handle_slash_part(self, target, chat, arg):
+        chan = arg.strip() or target
+        if chan.lower().startswith('#') or chan.lower().startswith('&'):
+            reason = ""
+            if ' ' in arg:
+                chan, reason = arg.split(' ', 1)
+            self.irc._send_raw(f"PART {chan}{(' :' + reason) if reason else ''}")
+
+    def _handle_slash_nick(self, target, chat, arg):
+        new = arg.strip()
+        if new:
+            self.irc._send_raw(f"NICK {new}")
+
+    def _handle_slash_me(self, target, chat, arg):
+        act = arg.strip()
+        if act:
+            # Echo as "* <nick> action" to match incoming ACTION format
+            nick = self.irc.nick or self.settings.get('nick', 'me')
+            chat.append_message(f"* {nick} {act}")
+            self.irc.send_action(target, act)
+            # Consistent send feedback (sound/beep)
+            try:
+                snd_cfg = self.settings.get('sounds', {})
+                if snd_cfg.get('enabled'):
+                    self._play_sound(snd_cfg.get('message_sent', ''))
+            except Exception:
+                pass
+            try:
+                if self._beeps_enabled:
+                    self._play_beep('send')
+            except Exception:
+                pass
+
+    def _handle_slash_notice(self, target, chat, arg):
+        if not arg:
+            self._on_irc_status("Usage: /notice <target> <text>")
+            return
+        a = arg.split(None, 1)
+        tgt = a[0]
+        msg = a[1] if len(a) > 1 else ""
+        if not msg:
+            self._on_irc_status("Usage: /notice <target> <text>")
+            return
+        # Route echo to the target tab for consistency
+        dest = self._chat_for_target(tgt, create=True)
+        dest.append_message(f"me: [notice] {msg}")
+        self.irc.send_notice(tgt, msg)
+        # Consistent send feedback (sound/beep)
+        try:
+            snd_cfg = self.settings.get('sounds', {})
+            if snd_cfg.get('enabled'):
+                self._play_sound(snd_cfg.get('message_sent', ''))
+        except Exception:
+            pass
+        try:
+            if self._beeps_enabled:
+                self._play_beep('send')
+        except Exception:
+            pass
+
+    def _handle_slash_topic(self, target, chat, arg):
+        arg_s = arg.strip()
+        if not arg_s:
+            if target.startswith('#') or target.startswith('&'):
+                self.irc.set_topic(target, None)
+            else:
+                self._on_irc_status("Usage: /topic [#channel] [text]")
+            return
+        if arg_s.startswith('#') or arg_s.startswith('&'):
+            # Could be just channel (query) or channel + text
+            if ' ' in arg_s:
+                chan, text = arg_s.split(' ', 1)
+                self.irc.set_topic(chan, text)
+            else:
+                self.irc.set_topic(arg_s, None)
+            return
+        # Otherwise, treat as text for current channel
+        if target.startswith('#') or target.startswith('&'):
+            self.irc.set_topic(target, arg_s)
+        else:
+            self._on_irc_status("Usage: /topic [#channel] [text]")
+
+    def _handle_slash_whois(self, target, chat, arg):
+        nick = arg.strip()
+        if not nick:
+            # If current tab is PM, default to that nick
+            if not (target.startswith('#') or target.startswith('&')):
+                nick = target
+        if not nick:
+            self._on_irc_status("Usage: /whois <nick>")
+            return
+        self.irc.whois(nick)
+
+    def _handle_slash_raw(self, target, chat, arg):
+        raw = arg
+        if not raw:
+            self._on_irc_status("Usage: /raw <line>")
+            return
+        self.irc.send_raw(raw)
+
+    def _handle_slash_msg(self, target, chat, arg):
+        self._handle_slash_query(target, chat, arg)
+
+    def _handle_slash_pm(self, target, chat, arg):
+        self._handle_slash_query(target, chat, arg)
+
+    def _handle_slash_query(self, target, chat, arg):
+        if not arg:
+            return
+        a = arg.split(None, 1)
+        nick = a[0]
+        msg = a[1] if len(a) > 1 else ""
+        pm = self._chat_for_target(nick, create=True)
+        if msg:
+            pm.append_message(f"me: {msg}")
+            self.irc.send_message(nick, msg)
+            # Consistent send feedback (sound/beep)
+            try:
+                snd_cfg = self.settings.get('sounds', {})
+                if snd_cfg.get('enabled'):
+                    self._play_sound(snd_cfg.get('message_sent', ''))
+            except Exception:
+                pass
+            try:
+                if self._beeps_enabled:
+                    self._play_beep('send')
+            except Exception:
+                pass
+        else:
+            pm.focus_input()
+
+    def _handle_slash_quit(self, target, chat, arg):
+        reason = arg.strip() or "Bye"
+        try:
+            self.irc._send_raw(f"QUIT :{reason}")
+        except Exception:
+            pass
+        self.Close()
 
     # IRC stub callbacks
     def _resolve_sound_path(self, path: str) -> str:
@@ -1294,26 +1307,8 @@ class MainFrame(wx.Frame):
         if text.startswith("CTCP "):
             msg = f"[CTCP] {text}"
         chat.append_message(f"[status] {msg}")
-        # Play notice sound only for NOTICEs, never for CTCP, to avoid spam
-        try:
-            if self.settings.get('sounds',{}).get('enabled'):
-                is_notice = text.startswith("NOTICE from ")
-                is_ctcp = text.startswith("CTCP ")
-                if is_notice and not is_ctcp:
-                    self._play_sound(self.settings.get('sounds',{}).get('notice',''))
-            # TTS for notices
-            try:
-                tts_cfg = self._get_tts_cfg()
-                if tts_cfg.get('enabled') and tts_cfg.get('events',{}).get('notice'):
-                    is_notice = text.startswith("NOTICE from ")
-                    is_ctcp = text.startswith("CTCP ")
-                    if is_notice and not is_ctcp:
-                        speak_text = text
-                        self._tts_speak(speak_text)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        self._handle_status_sound(text)
+        self._handle_status_tts(text)
 
     def _on_irc_message(self, target: str, sender: str, text: str):
         # Route to appropriate tab; for PMs, target is our nick → use sender
@@ -1337,6 +1332,10 @@ class MainFrame(wx.Frame):
             except Exception:
                 pass
 
+        self._handle_message_sound(target, sender, text)
+        self._handle_message_tts(target, sender, text)
+
+    def _handle_message_sound(self, target, sender, text):
         # Optional sounds (safe no-op if files missing)
         try:
             snd_cfg = self.settings.get('sounds', {})
@@ -1366,6 +1365,7 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
+    def _handle_message_tts(self, target, sender, text):
         # Text-to-speech for incoming messages
         try:
             tts_cfg = self._get_tts_cfg()
@@ -1378,14 +1378,38 @@ class MainFrame(wx.Frame):
                     if is_pm:
                         self._tts_speak(f"Notice from {sender}: {msg}")
                     else:
-                        self._tts_speak(f"Notice from {sender} in {tab_target}: {msg}")
+                        self._tts_speak(f"Notice from {sender} in {target}: {msg}")
                 # Mentions in channel
                 elif (not is_pm) and nick and nick.lower() in text.lower() and tts_cfg.get('events',{}).get('mention'):
-                    self._tts_speak(f"Mentioned by {sender} in {tab_target}: {text}")
+                    self._tts_speak(f"Mentioned by {sender} in {target}: {text}")
                 elif is_pm and tts_cfg.get('events',{}).get('private_message'):
                     self._tts_speak(f"Private message from {sender}: {text}")
                 elif (not is_pm) and tts_cfg.get('events',{}).get('channel_message'):
-                    self._tts_speak(f"{sender} in {tab_target}: {text}")
+                    self._tts_speak(f"{sender} in {target}: {text}")
+        except Exception:
+            pass
+
+    def _handle_status_sound(self, text):
+        # Play notice sound only for NOTICEs, never for CTCP, to avoid spam
+        try:
+            if self.settings.get('sounds',{}).get('enabled'):
+                is_notice = text.startswith("NOTICE from ")
+                is_ctcp = text.startswith("CTCP ")
+                if is_notice and not is_ctcp:
+                    self._play_sound(self.settings.get('sounds',{}).get('notice',''))
+        except Exception:
+            pass
+
+    def _handle_status_tts(self, text):
+        # TTS for notices
+        try:
+            tts_cfg = self._get_tts_cfg()
+            if tts_cfg.get('enabled') and tts_cfg.get('events',{}).get('notice'):
+                is_notice = text.startswith("NOTICE from ")
+                is_ctcp = text.startswith("CTCP ")
+                if is_notice and not is_ctcp:
+                    speak_text = text
+                    self._tts_speak(speak_text)
         except Exception:
             pass
 

@@ -8,6 +8,8 @@ from typing import Callable, Optional
 import base64
 import time
 
+from .event_bus import event_bus
+
 
 @dataclass
 class IRCClient:
@@ -16,10 +18,6 @@ class IRCClient:
     Callbacks are invoked from the network thread; the UI layer should marshal
     updates to the main thread (e.g., via wx.CallAfter).
     """
-
-    on_status: Optional[Callable[[str], None]] = field(default=None)
-    on_message: Optional[Callable[[str, str, str], None]] = field(default=None)  # target, sender, text
-    on_users: Optional[Callable[[str, list[str]], None]] = field(default=None)
 
     connected: bool = field(default=False, init=False)
     nick: str | None = field(default=None, init=False)
@@ -115,25 +113,13 @@ class IRCClient:
         self._emit_message(chan, "*", text)
 
     def _emit_status(self, text: str):
-        if self.on_status:
-            try:
-                self.on_status(text)
-            except Exception:
-                pass
+        event_bus.publish("irc.status", text=text)
 
     def _emit_message(self, target: str, sender: str, text: str):
-        if self.on_message:
-            try:
-                self.on_message(target, sender, text)
-            except Exception:
-                pass
+        event_bus.publish("irc.message", target=target, sender=sender, text=text)
 
     def _emit_users(self, target: str, users: list[str]):
-        if self.on_users:
-            try:
-                self.on_users(target, users)
-            except Exception:
-                pass
+        event_bus.publish("irc.users", target=target, users=users)
 
     # Networking helpers
     def _send_raw(self, line: str):
@@ -219,259 +205,288 @@ class IRCClient:
         cmd = parts[0]
         params = parts[1:]
 
-        if cmd == "PING":
-            self._send_raw(f"PONG :{trailing or 'ping'}")
+        handler = getattr(self, f"_handle_{cmd.lower()}", None)
+        if handler:
+            handler(prefix, params, trailing)
+
+    def _handle_ping(self, prefix, params, trailing):
+        self._send_raw(f"PONG :{trailing or 'ping'}")
+
+    def _handle_notice(self, prefix, params, trailing):
+        if trailing is None:
             return
-
-        if cmd == "NOTICE" and trailing is not None:
-            target = params[0] if params else ""
-            sender, _ = self._parse_prefix(prefix or "")
-            if self._is_ctcp(trailing):
-                # Suppress CTCP reply notices unless explicitly not ignored
-                if not self.ignore_ctcp:
-                    ctcp_cmd, ctcp_args = self._parse_ctcp(trailing)
-                    if ctcp_cmd:
-                        self._emit_status(f"CTCP {ctcp_cmd} reply from {sender}: {ctcp_args}")
-                return
-            # Route notices to the relevant tab when possible; otherwise, Console status
-            is_channel = target.startswith("#") or target.startswith("&")
-            is_pm = False
-            try:
-                me = (self.nick or "").lower()
-                is_pm = bool(me and target.lower() == me)
-            except Exception:
-                pass
-            if self.route_notices_inline and (is_channel or is_pm):
-                # Annotate notice in-line for clarity
-                self._emit_message(target, sender, f"[notice] {trailing}")
-            else:
-                self._emit_status(f"NOTICE from {sender}: {trailing}")
-            return
-
-        # SASL/CAP handling
-        if cmd == "CAP" and len(params) >= 2:
-            subcmd = params[1].upper()
-            if subcmd == "ACK" and trailing and "sasl" in trailing.lower():
-                self._send_raw("AUTHENTICATE PLAIN")
-                self._awaiting_auth_plus = True
-                return
-            if subcmd in ("NAK", "LS"):
-                if not self._awaiting_auth_plus and self._cap_in_progress:
-                    self._send_raw("CAP END")
-                    self._cap_in_progress = False
-                    self._send_registration()
-                return
-
-        if cmd == "AUTHENTICATE":
-            arg = (params[0] if params else "").strip()
-            if arg == "+" and self._awaiting_auth_plus:
-                u = self.sasl_username or (self.nick or "")
-                p = self.sasl_password or ""
-                token = ("\0" + u + "\0" + p).encode("utf-8")
-                b64 = base64.b64encode(token).decode("ascii")
-                self._send_raw("AUTHENTICATE " + b64)
-                return
-
-        if cmd == "903":
-            self._emit_status("SASL authentication successful")
-            if self._cap_in_progress:
-                self._send_raw("CAP END")
-                self._cap_in_progress = False
-            self._awaiting_auth_plus = False
-            self._send_registration()
-            return
-        if cmd in ("904", "905", "906"):
-            self._emit_status(f"SASL authentication failed ({cmd}). Continuing without SASL.")
-            if self._cap_in_progress:
-                self._send_raw("CAP END")
-                self._cap_in_progress = False
-            self._awaiting_auth_plus = False
-            self._send_registration()
-            return
-
-        if cmd == "PRIVMSG" and trailing is not None:
-            target = params[0]
-            sender, _ = self._parse_prefix(prefix or "")
-
-            # CTCP requests arrive via PRIVMSG
-            if self._is_ctcp(trailing):
-                # Special-case ACTION to show as an emote even if CTCP is ignored
+        target = params[0] if params else ""
+        sender, _ = self._parse_prefix(prefix or "")
+        if self._is_ctcp(trailing):
+            # Suppress CTCP reply notices unless explicitly not ignored
+            if not self.ignore_ctcp:
                 ctcp_cmd, ctcp_args = self._parse_ctcp(trailing)
-                if ctcp_cmd == "ACTION":
-                    # Emit as "* sender action" to the channel/pm target
-                    action_text = ctcp_args or ""
-                    self._emit_message(target, "*", f"{sender} {action_text}")
-                    return
-                if self.ignore_ctcp:
-                    return
                 if ctcp_cmd:
-                    # Only emit when not ignoring CTCP
-                    self._emit_status(f"CTCP {ctcp_cmd} from {sender} (target {target})")
-                    if ctcp_cmd == "VERSION" and self.respond_to_ctcp_version:
-                        self._send_ctcp_reply(sender, "VERSION", self.version_string)
-                    elif ctcp_cmd == "PING" and ctcp_args:
-                        self._send_ctcp_reply(sender, "PING", ctcp_args)
+                    self._emit_status(f"CTCP {ctcp_cmd} reply from {sender}: {ctcp_args}")
+            return
+        # Route notices to the relevant tab when possible; otherwise, Console status
+        is_channel = target.startswith("#") or target.startswith("&")
+        is_pm = False
+        try:
+            me = (self.nick or "").lower()
+            is_pm = bool(me and target.lower() == me)
+        except Exception:
+            pass
+        if self.route_notices_inline and (is_channel or is_pm):
+            # Annotate notice in-line for clarity
+            self._emit_message(target, sender, f"[notice] {trailing}")
+        else:
+            self._emit_status(f"NOTICE from {sender}: {trailing}")
+
+    def _handle_cap(self, prefix, params, trailing):
+        if len(params) < 2:
+            return
+        subcmd = params[1].upper()
+        if subcmd == "ACK" and trailing and "sasl" in trailing.lower():
+            self._send_raw("AUTHENTICATE PLAIN")
+            self._awaiting_auth_plus = True
+            return
+        if subcmd in ("NAK", "LS"):
+            if not self._awaiting_auth_plus and self._cap_in_progress:
+                self._send_raw("CAP END")
+                self._cap_in_progress = False
+                self._send_registration()
+            return
+
+    def _handle_authenticate(self, prefix, params, trailing):
+        arg = (params[0] if params else "").strip()
+        if arg == "+" and self._awaiting_auth_plus:
+            u = self.sasl_username or (self.nick or "")
+            p = self.sasl_password or ""
+            token = ("\0" + u + "\0" + p).encode("utf-8")
+            b64 = base64.b64encode(token).decode("ascii")
+            self._send_raw("AUTHENTICATE " + b64)
+            return
+
+    def _handle_903(self, prefix, params, trailing):
+        self._emit_status("SASL authentication successful")
+        if self._cap_in_progress:
+            self._send_raw("CAP END")
+            self._cap_in_progress = False
+        self._awaiting_auth_plus = False
+        self._send_registration()
+
+    def _handle_904(self, prefix, params, trailing):
+        self._emit_status(f"SASL authentication failed (904). Continuing without SASL.")
+        if self._cap_in_progress:
+            self._send_raw("CAP END")
+            self._cap_in_progress = False
+        self._awaiting_auth_plus = False
+        self._send_registration()
+
+    def _handle_905(self, prefix, params, trailing):
+        self._emit_status(f"SASL authentication failed (905). Continuing without SASL.")
+        if self._cap_in_progress:
+            self._send_raw("CAP END")
+            self._cap_in_progress = False
+        self._awaiting_auth_plus = False
+        self._send_registration()
+
+    def _handle_906(self, prefix, params, trailing):
+        self._emit_status(f"SASL authentication failed (906). Continuing without SASL.")
+        if self._cap_in_progress:
+            self._send_raw("CAP END")
+            self._cap_in_progress = False
+        self._awaiting_auth_plus = False
+        self._send_registration()
+
+    def _handle_privmsg(self, prefix, params, trailing):
+        if trailing is None:
+            return
+        target = params[0]
+        sender, _ = self._parse_prefix(prefix or "")
+
+        # CTCP requests arrive via PRIVMSG
+        if self._is_ctcp(trailing):
+            # Special-case ACTION to show as an emote even if CTCP is ignored
+            ctcp_cmd, ctcp_args = self._parse_ctcp(trailing)
+            if ctcp_cmd == "ACTION":
+                # Emit as "* sender action" to the channel/pm target
+                action_text = ctcp_args or ""
+                self._emit_message(target, "*", f"{sender} {action_text}")
                 return
-
-            # Not CTCP → normal chat message
-            self._emit_message(target, sender, trailing)
-            return
-
-        # Topic replies
-        if cmd == "331" and len(params) >= 2:  # RPL_NOTOPIC
-            channel = params[1]
-            self._emit_status(f"No topic set for {channel}")
-            return
-        if cmd == "332" and len(params) >= 2 and trailing is not None:  # RPL_TOPIC
-            channel = params[1]
-            topic = trailing
-            self._emit_status(f"Topic for {channel}: {topic}")
-            return
-        if cmd == "333" and len(params) >= 4:  # RPL_TOPICWHOTIME
-            channel = params[1]
-            set_by = params[2]
-            try:
-                ts = int(params[3])
-                when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-            except Exception:
-                when = params[3]
-            self._emit_status(f"Topic for {channel} set by {set_by} at {when}")
-            return
-
-        # WHOIS replies
-        if cmd == "311" and len(params) >= 5 and trailing is not None:  # RPL_WHOISUSER
-            nick = params[1]; user = params[2]; host = params[3]
-            real = trailing
-            self._emit_status(f"WHOIS {nick}: {user}@{host} — {real}")
-            return
-        if cmd == "312" and len(params) >= 3 and trailing is not None:  # RPL_WHOISSERVER
-            nick = params[1]; server = params[2]; info = trailing
-            self._emit_status(f"WHOIS {nick}: on {server} — {info}")
-            return
-        if cmd == "317" and len(params) >= 3:  # RPL_WHOISIDLE
-            nick = params[1]
-            try:
-                idle = int(params[2])
-            except Exception:
-                idle = params[2]
-            signon = None
-            if len(params) >= 4:
-                try:
-                    signon_ts = int(params[3])
-                    signon = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(signon_ts))
-                except Exception:
-                    signon = params[3]
-            msg = f"WHOIS {nick}: idle {idle}s"
-            if signon:
-                msg += f"; signon {signon}"
-            self._emit_status(msg)
-            return
-        if cmd == "319" and len(params) >= 2 and trailing is not None:  # RPL_WHOISCHANNELS
-            nick = params[1]
-            chans = trailing
-            self._emit_status(f"WHOIS {nick}: channels: {chans}")
-            return
-        if cmd == "318" and len(params) >= 2 and trailing is not None:  # RPL_ENDOFWHOIS
-            nick = params[1]
-            self._emit_status(f"WHOIS {nick}: {trailing}")
-            return
-
-        # JOIN/PART/QUIT/NICK handling to keep user lists and show events
-        if cmd == "JOIN":
-            sender, _ = self._parse_prefix(prefix or "")
-            chan = (params[0] if params else trailing) or ""
-            if chan:
-                # Track membership
-                key = chan.lower()
-                self._chan_display[key] = chan
-                users = self._chan_users.setdefault(key, set())
-                users.add(sender)
-                # Emit updated user list
-                self._emit_users(self._chan_display.get(key, chan), sorted(users))
-                # Emit notice or queue activity summary
-                if self.activity_summaries:
-                    self._queue_activity(chan, joined=[sender])
-                elif self.show_join_part_notices:
-                    self._emit_message(chan, "*", f"{sender} joined {chan}")
+            if self.ignore_ctcp:
                 return
-
-        if cmd == "PART":
-            sender, _ = self._parse_prefix(prefix or "")
-            chan = params[0] if params else ""
-            if chan:
-                reason = trailing or ""
-                if not self.activity_summaries and self.show_join_part_notices:
-                    self._emit_message(chan, "*", f"{sender} left {chan}{(' (' + reason + ')') if reason else ''}")
-                # Update membership
-                key = chan.lower()
-                users = self._chan_users.setdefault(key, set())
-                if sender in users:
-                    users.remove(sender)
-                self._emit_users(self._chan_display.get(key, chan), sorted(users))
-                if self.activity_summaries:
-                    self._queue_activity(chan, parted=[sender])
+            if ctcp_cmd:
+                # Only emit when not ignoring CTCP
+                self._emit_status(f"CTCP {ctcp_cmd} from {sender} (target {target})")
+                if ctcp_cmd == "VERSION" and self.respond_to_ctcp_version:
+                    self._send_ctcp_reply(sender, "VERSION", self.version_string)
+                elif ctcp_cmd == "PING" and ctcp_args:
+                    self._send_ctcp_reply(sender, "PING", ctcp_args)
             return
 
-        if cmd == "KICK" and len(params) >= 2:
-            chan = params[0]
-            victim = params[1]
-            kicker, _ = self._parse_prefix(prefix or "")
+        # Not CTCP → normal chat message
+        self._emit_message(target, sender, trailing)
+
+    def _handle_331(self, prefix, params, trailing):  # RPL_NOTOPIC
+        if len(params) < 2:
+            return
+        channel = params[1]
+        self._emit_status(f"No topic set for {channel}")
+
+    def _handle_332(self, prefix, params, trailing):  # RPL_TOPIC
+        if len(params) < 2 or trailing is None:
+            return
+        channel = params[1]
+        topic = trailing
+        self._emit_status(f"Topic for {channel}: {topic}")
+
+    def _handle_333(self, prefix, params, trailing):  # RPL_TOPICWHOTIME
+        if len(params) < 4:
+            return
+        channel = params[1]
+        set_by = params[2]
+        try:
+            ts = int(params[3])
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        except Exception:
+            when = params[3]
+        self._emit_status(f"Topic for {channel} set by {set_by} at {when}")
+
+    def _handle_311(self, prefix, params, trailing):  # RPL_WHOISUSER
+        if len(params) < 5 or trailing is None:
+            return
+        nick = params[1]; user = params[2]; host = params[3]
+        real = trailing
+        self._emit_status(f"WHOIS {nick}: {user}@{host} — {real}")
+
+    def _handle_312(self, prefix, params, trailing):  # RPL_WHOISSERVER
+        if len(params) < 3 or trailing is None:
+            return
+        nick = params[1]; server = params[2]; info = trailing
+        self._emit_status(f"WHOIS {nick}: on {server} — {info}")
+
+    def _handle_317(self, prefix, params, trailing):  # RPL_WHOISIDLE
+        if len(params) < 3:
+            return
+        nick = params[1]
+        try:
+            idle = int(params[2])
+        except Exception:
+            idle = params[2]
+        signon = None
+        if len(params) >= 4:
+            try:
+                signon_ts = int(params[3])
+                signon = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(signon_ts))
+            except Exception:
+                signon = params[3]
+        msg = f"WHOIS {nick}: idle {idle}s"
+        if signon:
+            msg += f"; signon {signon}"
+        self._emit_status(msg)
+
+    def _handle_319(self, prefix, params, trailing):  # RPL_WHOISCHANNELS
+        if len(params) < 2 or trailing is None:
+            return
+        nick = params[1]
+        chans = trailing
+        self._emit_status(f"WHOIS {nick}: channels: {chans}")
+
+    def _handle_318(self, prefix, params, trailing):  # RPL_ENDOFWHOIS
+        if len(params) < 2 or trailing is None:
+            return
+        nick = params[1]
+        self._emit_status(f"WHOIS {nick}: {trailing}")
+
+    def _handle_join(self, prefix, params, trailing):
+        sender, _ = self._parse_prefix(prefix or "")
+        chan = (params[0] if params else trailing) or ""
+        if chan:
+            # Track membership
+            key = chan.lower()
+            self._chan_display[key] = chan
+            users = self._chan_users.setdefault(key, set())
+            users.add(sender)
+            # Emit updated user list
+            self._emit_users(self._chan_display.get(key, chan), sorted(users))
+            # Emit notice or queue activity summary
+            if self.activity_summaries:
+                self._queue_activity(chan, joined=[sender])
+            elif self.show_join_part_notices:
+                self._emit_message(chan, "*", f"{sender} joined {chan}")
+
+    def _handle_part(self, prefix, params, trailing):
+        sender, _ = self._parse_prefix(prefix or "")
+        chan = params[0] if params else ""
+        if chan:
             reason = trailing or ""
+            if not self.activity_summaries and self.show_join_part_notices:
+                self._emit_message(chan, "*", f"{sender} left {chan}{(' (' + reason + ')') if reason else ''}")
+            # Update membership
             key = chan.lower()
             users = self._chan_users.setdefault(key, set())
-            if victim in users:
-                users.remove(victim)
-            # Update list regardless of notice preference
+            if sender in users:
+                users.remove(sender)
             self._emit_users(self._chan_display.get(key, chan), sorted(users))
-            # Treat like a PART-style notice (respect preference)
             if self.activity_summaries:
-                self._queue_activity(chan, kicked=[victim])
-            elif self.show_join_part_notices:
-                msg = f"{victim} was kicked from {chan} by {kicker}"
-                if reason:
-                    msg += f" ({reason})"
-                self._emit_message(chan, "*", msg)
-            return
+                self._queue_activity(chan, parted=[sender])
 
-        if cmd == "QUIT":
-            sender, _ = self._parse_prefix(prefix or "")
-            reason = trailing or ""
-            # Without tracking channel membership, request NAMES on all known channels would be ideal
-            # If we are in any channels, the server will often send PART/QUIT effects; request a global NAMES refresh is not possible
+    def _handle_kick(self, prefix, params, trailing):
+        if len(params) < 2:
+            return
+        chan = params[0]
+        victim = params[1]
+        kicker, _ = self._parse_prefix(prefix or "")
+        reason = trailing or ""
+        key = chan.lower()
+        users = self._chan_users.setdefault(key, set())
+        if victim in users:
+            users.remove(victim)
+        # Update list regardless of notice preference
+        self._emit_users(self._chan_display.get(key, chan), sorted(users))
+        # Treat like a PART-style notice (respect preference)
+        if self.activity_summaries:
+            self._queue_activity(chan, kicked=[victim])
+        elif self.show_join_part_notices:
+            msg = f"{victim} was kicked from {chan} by {kicker}"
+            if reason:
+                msg += f" ({reason})"
+            self._emit_message(chan, "*", msg)
+
+    def _handle_quit(self, prefix, params, trailing):
+        sender, _ = self._parse_prefix(prefix or "")
+        reason = trailing or ""
+        # Without tracking channel membership, request NAMES on all known channels would be ideal
+        # If we are in any channels, the server will often send PART/QUIT effects; request a global NAMES refresh is not possible
+        if self.show_quit_nick_notices:
+            self._emit_status(f"{sender} quit IRC{(' (' + reason + ')') if reason else ''}")
+        # Remove from all tracked channels and emit user updates
+        for key, users in list(self._chan_users.items()):
+            if sender in users:
+                users.remove(sender)
+                self._emit_users(self._chan_display.get(key, key), sorted(users))
+
+    def _handle_nick(self, prefix, params, trailing):
+        sender, _ = self._parse_prefix(prefix or "")
+        new_nick = trailing or (params[0] if params else "")
+        if new_nick:
             if self.show_quit_nick_notices:
-                self._emit_status(f"{sender} quit IRC{(' (' + reason + ')') if reason else ''}")
-            # Remove from all tracked channels and emit user updates
+                self._emit_status(f"{sender} is now known as {new_nick}")
+            # Rename in all tracked channels
             for key, users in list(self._chan_users.items()):
                 if sender in users:
                     users.remove(sender)
+                    users.add(new_nick)
                     self._emit_users(self._chan_display.get(key, key), sorted(users))
-            return
 
-        if cmd == "NICK":
-            sender, _ = self._parse_prefix(prefix or "")
-            new_nick = trailing or (params[0] if params else "")
-            if new_nick:
-                if self.show_quit_nick_notices:
-                    self._emit_status(f"{sender} is now known as {new_nick}")
-                # Rename in all tracked channels
-                for key, users in list(self._chan_users.items()):
-                    if sender in users:
-                        users.remove(sender)
-                        users.add(new_nick)
-                        self._emit_users(self._chan_display.get(key, key), sorted(users))
+    def _handle_353(self, prefix, params, trailing):  # RPL_NAMREPLY
+        if len(params) < 3 or trailing is None:
             return
+        channel = params[2]
+        names = [n.lstrip("@+") for n in trailing.split()]
+        key = channel.lower()
+        self._chan_display[key] = channel
+        self._chan_users[key] = set(names)
+        self._emit_users(channel, sorted(self._chan_users[key]))
 
-        # RPL_NAMREPLY (353): <me> <symbol> <channel> :name1 name2
-        if cmd == "353" and len(params) >= 3 and trailing is not None:
-            channel = params[2]
-            names = [n.lstrip("@+") for n in trailing.split()]
-            key = channel.lower()
-            self._chan_display[key] = channel
-            self._chan_users[key] = set(names)
-            self._emit_users(channel, sorted(self._chan_users[key]))
-            return
-
-        # RPL_ENDOFNAMES (366) could be handled to signal completion
+    # RPL_ENDOFNAMES (366) could be handled to signal completion
 
     # Public API
     def connect(self, host: str, port: int, nick: str, *, use_tls: bool = True):
@@ -544,13 +559,16 @@ class IRCClient:
             self._sock = None
             self._emit_status(f"Connect failed: {e}")
 
-    def join_channel(self, channel: str):
+    def join_channel(self, channel: str, key: str | None = None):
         if not self.connected:
             self._emit_status("Not connected.")
             return
         if not channel.startswith("#") and not channel.startswith("&"):
             channel = f"#{channel}"
-        self._send_raw(f"JOIN {channel}")
+        if key:
+            self._send_raw(f"JOIN {channel} {key}")
+        else:
+            self._send_raw(f"JOIN {channel}")
 
     def send_message(self, target: str, text: str):
         if not self.connected:
