@@ -93,9 +93,10 @@ class MainFrame(wx.Frame):
             pass
         try:
             tabs = list(self.settings.get('open_tabs', []))
-            for t in tabs:
-                if isinstance(t, str) and t and t.lower() != 'console':
-                    self._add_chat_tab(t)
+            if tabs:
+                # Skip restoring tabs until autoconnect is implemented; keep only Console.
+                self.settings['open_tabs'] = []
+                save(self.settings)
         except Exception:
             pass
 
@@ -1518,9 +1519,7 @@ class MainFrame(wx.Frame):
                 size = self.GetSize(); pos = self.GetPosition()
                 self.settings.setdefault('window', {})['size'] = [size.width, size.height]
                 self.settings.setdefault('window', {})['position'] = [pos.x, pos.y]
-                tabs = [self.notebook.GetPageText(i) for i in range(self.notebook.GetPageCount())]
-                # exclude Console from saved list; we'll always create it
-                self.settings['open_tabs'] = [t for t in tabs if t.lower() != 'console']
+                self.settings['open_tabs'] = []
                 save(self.settings)
             except Exception:
                 pass
@@ -1546,8 +1545,7 @@ class MainFrame(wx.Frame):
                 size = self.GetSize(); pos = self.GetPosition()
                 self.settings.setdefault('window', {})['size'] = [size.width, size.height]
                 self.settings.setdefault('window', {})['position'] = [pos.x, pos.y]
-                tabs = [self.notebook.GetPageText(i) for i in range(self.notebook.GetPageCount())]
-                self.settings['open_tabs'] = [t for t in tabs if t.lower() != 'console']
+                self.settings['open_tabs'] = []
                 save(self.settings)
             except Exception:
                 pass
