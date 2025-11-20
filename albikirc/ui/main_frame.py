@@ -31,6 +31,7 @@ class MainFrame(wx.Frame):
 
         # Experimental beeps
         self._beeps_enabled = bool(self.settings.get('beeps', {}).get('enabled', False))
+        self._tts_proc = None
 
         # Notifications prefs
         notif = self.settings.get('notifications', {})
@@ -829,6 +830,7 @@ class MainFrame(wx.Frame):
             ev = tts.get('events', {}) or {}
             return {
                 'enabled': bool(tts.get('enabled', False)),
+                'interrupt': bool(tts.get('interrupt', False)),
                 'voice': tts.get('voice', 'Default'),
                 'language': tts.get('language', ''),
                 'rate_wpm': int(tts.get('rate_wpm', 180)),
@@ -922,6 +924,8 @@ class MainFrame(wx.Frame):
             cfg = self._get_tts_cfg()
             if not cfg.get('enabled'):
                 return
+            if cfg.get('interrupt'):
+                self._tts_stop_current()
             tts = getattr(self, '_tts', None)
             if tts and hasattr(tts, 'Speak') and text:
                 tts.Speak(text)
@@ -931,9 +935,46 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
+    def _tts_stop_current(self):
+        try:
+            tts = getattr(self, '_tts', None)
+            if tts and hasattr(tts, 'Stop'):
+                try:
+                    tts.Stop()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            proc = getattr(self, '_tts_proc', None)
+            if not proc:
+                return
+            try:
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+            finally:
+                self._tts_proc = None
+        except Exception:
+            self._tts_proc = None
+
+    def _tts_start_process(self, cmd: list[str]) -> bool:
+        try:
+            import subprocess
+            proc = subprocess.Popen(cmd)
+            self._tts_proc = proc
+            return True
+        except Exception:
+            return False
+
     def _tts_speak_fallback(self, text: str, cfg: dict | None = None):
         try:
-            import sys, subprocess, shlex
+            import sys
             cfg = cfg or self._get_tts_cfg()
             voice = str(cfg.get('voice', 'Default'))
             wpm = int(cfg.get('rate_wpm', 180))
@@ -943,12 +984,9 @@ class MainFrame(wx.Frame):
                 if voice and voice.lower() != 'default':
                     cmd += ["-v", voice]
                 # macOS say expects approximate words per minute via -r
-                cmd += ["-r", str(max(80, min(600, wpm))) , text]
-                try:
-                    subprocess.Popen(cmd)
+                cmd += ["-r", str(max(80, min(600, wpm))), text]
+                if self._tts_start_process(cmd):
                     return
-                except Exception:
-                    pass
             # Windows: SAPI via PowerShell
             if sys.platform.startswith('win'):
                 rate = self._tts_map_rate(wpm)
@@ -961,25 +999,17 @@ class MainFrame(wx.Frame):
                 if voice and voice.lower() != 'default':
                     ps += f"try{{$s.SelectVoice('{voice}')}}catch{{}};"
                 ps += "$s.Speak($t);"
-                try:
-                    subprocess.Popen(["powershell", "-NoProfile", "-Command", ps])
+                if self._tts_start_process(["powershell", "-NoProfile", "-Command", ps]):
                     return
-                except Exception:
-                    pass
             # Linux: espeak or spd-say
-            try:
-                cmd = ["espeak", f"-s{max(80,min(600,wpm))}"]
-                if voice and voice.lower() != 'default':
-                    cmd += ["-v", voice]
-                cmd.append(text)
-                subprocess.Popen(cmd)
+            cmd = ["espeak", f"-s{max(80,min(600,wpm))}"]
+            if voice and voice.lower() != 'default':
+                cmd += ["-v", voice]
+            cmd.append(text)
+            if self._tts_start_process(cmd):
                 return
-            except Exception:
-                try:
-                    subprocess.Popen(["spd-say", text])
-                    return
-                except Exception:
-                    pass
+            if self._tts_start_process(["spd-say", text]):
+                return
         except Exception:
             pass
 

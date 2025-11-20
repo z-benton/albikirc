@@ -5,6 +5,7 @@
 ### New Features
 
 *   Added support for joining channels with keys.
+*   Added a Text-to-Speech preference to interrupt ongoing speech so incoming messages speak immediately without piling up.
 
 ### Refactoring
 

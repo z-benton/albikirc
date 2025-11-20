@@ -134,6 +134,10 @@ class PreferencesDialog(wx.Dialog):
         self.chk_tts_enabled.SetName("Enable TTS checkbox")
         self.chk_tts_enabled.SetValue(bool(tts_cfg.get('enabled', False)))
         self.chk_tts_enabled.SetToolTip("Speak selected events using system text-to-speech")
+        self.chk_tts_interrupt = wx.CheckBox(p_tts, label="Interrupt speech with newer messages")
+        self.chk_tts_interrupt.SetName("Interrupt TTS checkbox")
+        self.chk_tts_interrupt.SetToolTip("Stop any ongoing speech when another event needs to speak")
+        self.chk_tts_interrupt.SetValue(bool(tts_cfg.get('interrupt', False)))
 
         # Voice selection: replace dropdown with Choose Voice… (grouped submenu)
         sel_voice = str(tts_cfg.get('voice', 'Default'))
@@ -333,6 +337,7 @@ class PreferencesDialog(wx.Dialog):
             pass
         s_tts.Add(help_tts, 0, wx.ALL, 6)
         s_tts.Add(self.chk_tts_enabled, 0, wx.ALL, 6)
+        s_tts.Add(self.chk_tts_interrupt, 0, wx.LEFT | wx.RIGHT, 12)
         row_voice = wx.BoxSizer(wx.HORIZONTAL)
         row_voice.Add(wx.StaticText(p_tts, label="Voice:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         row_voice.Add(self.txt_tts_voice, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
@@ -936,6 +941,7 @@ class PreferencesDialog(wx.Dialog):
             },
             'tts': {
                 'enabled': self.chk_tts_enabled.GetValue(),
+                'interrupt': self.chk_tts_interrupt.GetValue(),
                 'voice': (getattr(self, '_last_tts_voice', '') or 'Default').strip(),
                 # Preserve language preference chosen via macOS Speech menu
                 'language': str((self._settings.get('tts', {}) or {}).get('language', '')),
