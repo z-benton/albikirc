@@ -24,6 +24,9 @@ albikirc = "albikirc.app:main"
 line-length = 100
 target-version = "py310"
 
+[tool.setuptools.package-data]
+albikirc = ["Sounds/*.wav"]
+
 [tool.mypy]
 python_version = "3.10"
 ignore_missing_imports = true

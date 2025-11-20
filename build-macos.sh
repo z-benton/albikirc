@@ -6,7 +6,7 @@ set -euo pipefail
 
 APP_NAME="Albikirc"
 ENTRYPOINT="albikirc/app.py"
-SOUNDS_DIR="Sounds"
+SOUNDS_DIR="albikirc/Sounds"
 # Virtualenv selection happens dynamically below; default if none found
 DEFAULT_VENV_DIR=".venv-build"
 VENV_DIR=""
@@ -196,7 +196,7 @@ if [[ -n "$ICON_PATH" ]]; then
   PI_ARGS+=( --icon "$ICON_PATH" )
 fi
 
-PI_ARGS+=( --add-data "${SOUNDS_DIR}:${SOUNDS_DIR}" "${ENTRYPOINT}" )
+PI_ARGS+=( --add-data "${SOUNDS_DIR}:Sounds" "${ENTRYPOINT}" )
 
 # Constrain PyInstaller cache into workspace (sandbox-safe)
 export PYINSTALLER_CACHE_DIR="${PWD}/.pyinstaller-cache"

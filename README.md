@@ -122,8 +122,8 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
   - `Compact activity summaries`: batch join/part/kick into a single summary line per interval instead of many lines.
   - `Summary window (seconds)`: how long to batch activity before summarizing (default 10s).
   - `Show NOTICEs inline in tabs`: when enabled, NOTICEs targeting a channel or you (PM) appear inline in that conversation with a `[notice]` label; when disabled, they appear only as Console status lines.
-- Sounds: Enable optional sounds and set file paths for message/mention/notice, channel messages, and private/query messages.
-  - Experimental: Optional synthesized beep tones (ascending on send, descending on receive).
+- Sounds: A bundled sound pack is enabled by default with event-specific sounds for messages, mentions, notices, channel messages, and private/query messages. You can point each event to a custom file.
+  - Experimental: Optional synthesized beep tones (ascending on send, descending on receive) remain opt-in.
 
 ## Behavior Details
 - Message tags: The client strips IRCv3 message tags (lines starting with `@`) for robust parsing, so messages from servers with tags display correctly.

@@ -3,7 +3,7 @@ import wx.adv
 
 from .chat_panel import ChatPanel
 from ..irc_client import IRCClient
-from ..config import save
+from ..config import save, _default_sound_path
 from .connect_dialog import ConnectDialog
 from .preferences_dialog import PreferencesDialog
 from .saved_servers_dialog import SavedServersDialog
@@ -1235,9 +1235,16 @@ class MainFrame(wx.Frame):
             import os
             # Expand user and env vars
             p = os.path.expanduser(os.path.expandvars(path))
-            # Only accept the provided path (absolute or CWD-relative). No fallbacks.
+            # Prefer the provided path (absolute or CWD-relative).
             if os.path.exists(p):
                 return p
+            # Backward-compat: if the configured path is missing but the filename
+            # matches a bundled sound, use the bundled copy to avoid disabling sounds.
+            base = os.path.basename(p)
+            if base:
+                fallback = _default_sound_path(base)
+                if fallback:
+                    return fallback
         except Exception:
             pass
         return ""
