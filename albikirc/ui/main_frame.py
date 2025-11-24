@@ -1254,22 +1254,13 @@ class MainFrame(wx.Frame):
         Returns (ok: bool, method: str, error: str|None).
         """
         try:
+            last_err = None
             if not resolved_path:
                 return (False, "none", None)
-            # wx.Sound (classic) or wx.adv.Sound (phoenix optional)
-            try:
-                SoundCls = getattr(wx, 'Sound', None) or getattr(wx.adv, 'Sound', None)
-                if SoundCls is not None:
-                    snd = SoundCls(resolved_path)
-                    if hasattr(snd, 'IsOk') and not snd.IsOk():
-                        return (False, "wx.Sound", None)
-                    self._last_sound = snd
-                    snd.Play(getattr(wx, 'SOUND_ASYNC', 0))
-                    return (True, "wx.Sound", None)
-            except Exception as e:
-                last_err = str(e)
-                # fallthrough to other backends
-            # OS-native fallbacks
+            # Interrupt any currently playing sound before starting a new one
+            self._stop_sound_playback()
+            self._cleanup_sound_processes()
+            # Prefer OS-native players we can terminate for real interruption
             import sys
             if sys.platform.startswith('win'):
                 try:
@@ -1282,34 +1273,97 @@ class MainFrame(wx.Frame):
                 try:
                     import subprocess
                     p = subprocess.Popen(["afplay", resolved_path])
-                    # keep reference to prevent GC
-                    if not hasattr(self, '_sound_procs'):
-                        self._sound_procs = []
-                    self._sound_procs.append(p)
+                    self._register_sound_proc(p)
                     return (True, "afplay", None)
                 except Exception as e:
-                    return (False, "afplay", str(e))
+                    last_err = str(e)
             else:
                 # Linux: try paplay, then aplay
                 try:
                     import subprocess
                     p = subprocess.Popen(["paplay", resolved_path])
-                    if not hasattr(self, '_sound_procs'):
-                        self._sound_procs = []
-                    self._sound_procs.append(p)
+                    self._register_sound_proc(p)
                     return (True, "paplay", None)
                 except Exception as e1:
                     try:
                         import subprocess
                         p = subprocess.Popen(["aplay", resolved_path])
-                        if not hasattr(self, '_sound_procs'):
-                            self._sound_procs = []
-                        self._sound_procs.append(p)
+                        self._register_sound_proc(p)
                         return (True, "aplay", None)
                     except Exception as e2:
-                        return (False, "paplay/aplay", f"{e1}; {e2}")
+                        last_err = f"{e1}; {e2}"
+            # wx.Sound (classic) or wx.adv.Sound (phoenix optional) as a fallback
+            try:
+                SoundCls = getattr(wx, 'Sound', None) or getattr(wx.adv, 'Sound', None)
+                if SoundCls is not None:
+                    snd = SoundCls(resolved_path)
+                    if hasattr(snd, 'IsOk') and not snd.IsOk():
+                        return (False, "wx.Sound", None)
+                    self._last_sound = snd
+                    snd.Play(getattr(wx, 'SOUND_ASYNC', 0))
+                    return (True, "wx.Sound", None)
+            except Exception as e:
+                last_err = str(e)
+                # fallthrough to error handling
+            return (False, "none", last_err)
         except Exception as e:
             return (False, "error", str(e))
+
+    def _register_sound_proc(self, proc):
+        """Track a subprocess-based sound so finished processes can be cleaned up."""
+        if not hasattr(self, '_sound_procs'):
+            self._sound_procs = []
+        self._sound_procs.append(proc)
+
+    def _cleanup_sound_processes(self):
+        """Remove completed subprocess sound players to avoid leaks."""
+        try:
+            if not hasattr(self, '_sound_procs'):
+                return
+            alive = []
+            for p in self._sound_procs:
+                try:
+                    if p.poll() is None:
+                        alive.append(p)
+                except Exception:
+                    continue
+            self._sound_procs = alive
+        except Exception:
+            pass
+
+    def _stop_sound_playback(self):
+        """Stop any in-flight sound so the next one can start immediately."""
+        try:
+            SoundCls = getattr(wx, 'Sound', None) or getattr(wx.adv, 'Sound', None)
+            if SoundCls is not None and hasattr(SoundCls, 'Stop'):
+                SoundCls.Stop()
+        except Exception:
+            pass
+        try:
+            import sys
+            if sys.platform.startswith('win'):
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+        try:
+            import sys
+            if hasattr(self, '_sound_procs'):
+                for p in list(self._sound_procs):
+                    try:
+                        if p.poll() is None and sys.platform == 'darwin':
+                            # afplay stops cleanly on terminate
+                            p.terminate()
+                    except Exception:
+                        pass
+                    try:
+                        if p.poll() is None:
+                            p.kill()
+                    except Exception:
+                        pass
+                self._sound_procs = []
+        except Exception:
+            pass
 
     def _disable_sounds_due_error(self, reason: str = ""):
         # Disable sounds globally and notify once

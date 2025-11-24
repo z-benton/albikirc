@@ -123,6 +123,7 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
   - `Summary window (seconds)`: how long to batch activity before summarizing (default 10s).
   - `Show NOTICEs inline in tabs`: when enabled, NOTICEs targeting a channel or you (PM) appear inline in that conversation with a `[notice]` label; when disabled, they appear only as Console status lines.
 - Sounds: A bundled sound pack is enabled by default with event-specific sounds for messages, mentions, notices, channel messages, and private/query messages. You can point each event to a custom file.
+  - Playback interrupts in-flight clips so new alerts are heard immediately.
   - Experimental: Optional synthesized beep tones (ascending on send, descending on receive) remain opt-in.
 
 ## Behavior Details
