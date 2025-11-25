@@ -1,3 +1,6 @@
+import time
+from collections import deque
+
 import wx
 import wx.adv
 
@@ -32,6 +35,11 @@ class MainFrame(wx.Frame):
         # Experimental beeps
         self._beeps_enabled = bool(self.settings.get('beeps', {}).get('enabled', False))
         self._tts_proc = None
+        self._tts_queue = deque()
+        self._tts_busy = False
+        self._tts_last_active = 0.0
+        self._tts_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_tts_timer, self._tts_timer)
 
         # Notifications prefs
         notif = self.settings.get('notifications', {})
@@ -859,6 +867,11 @@ class MainFrame(wx.Frame):
     def _tts_init(self):
         cfg = self._get_tts_cfg()
         self._tts_enabled = bool(cfg.get('enabled', False))
+        if not self._tts_enabled:
+            self._tts_clear_queue()
+            self._tts_stop_current()
+            self._stop_tts_timer()
+            return
         try:
             TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
             if TTS is None:
@@ -919,19 +932,109 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
-    def _tts_speak(self, text: str):
+    def _ensure_tts_timer(self):
         try:
-            cfg = self._get_tts_cfg()
-            if not cfg.get('enabled'):
-                return
-            if cfg.get('interrupt'):
-                self._tts_stop_current()
+            if getattr(self, '_tts_timer', None) and not self._tts_timer.IsRunning():
+                self._tts_timer.Start(150)
+        except Exception:
+            pass
+
+    def _stop_tts_timer(self):
+        try:
+            if getattr(self, '_tts_timer', None) and self._tts_timer.IsRunning():
+                self._tts_timer.Stop()
+        except Exception:
+            pass
+
+    def _tts_clear_queue(self):
+        try:
+            if hasattr(self, '_tts_queue') and self._tts_queue is not None:
+                self._tts_queue.clear()
+        except Exception:
+            self._tts_queue = deque()
+
+    def _tts_is_busy(self) -> bool:
+        try:
+            tts = getattr(self, '_tts', None)
+            if tts and hasattr(tts, 'IsSpeaking') and tts.IsSpeaking():
+                self._tts_last_active = time.time()
+                return True
+        except Exception:
+            pass
+        try:
+            proc = getattr(self, '_tts_proc', None)
+            if proc:
+                if proc.poll() is None:
+                    self._tts_last_active = time.time()
+                    return True
+                self._tts_proc = None
+        except Exception:
+            self._tts_proc = None
+        # Give recently started speech a short grace window even if the backend
+        # does not expose speaking state.
+        try:
+            if self._tts_busy and (time.time() - float(self._tts_last_active or 0.0)) < 0.1:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _tts_start_playback(self, text: str, cfg: dict):
+        started = False
+        try:
             tts = getattr(self, '_tts', None)
             if tts and hasattr(tts, 'Speak') and text:
                 tts.Speak(text)
+                started = True
+        except Exception:
+            started = False
+        if not started:
+            started = self._tts_speak_fallback(text, cfg)
+        self._tts_busy = bool(started)
+        if started:
+            self._tts_last_active = time.time()
+            self._ensure_tts_timer()
+        else:
+            self._tts_busy = False
+
+    def _on_tts_timer(self, evt):
+        try:
+            cfg = self._get_tts_cfg()
+            if not cfg.get('enabled'):
+                self._tts_clear_queue()
+                self._tts_stop_current()
+                self._tts_busy = False
+                self._stop_tts_timer()
                 return
-            # Fallback to OS-level TTS
-            self._tts_speak_fallback(text, cfg)
+            if self._tts_is_busy():
+                return
+            self._tts_busy = False
+            if self._tts_queue:
+                nxt = self._tts_queue.popleft()
+                self._tts_start_playback(nxt, cfg)
+            else:
+                self._stop_tts_timer()
+        except Exception:
+            try:
+                self._stop_tts_timer()
+            except Exception:
+                pass
+
+    def _tts_speak(self, text: str):
+        try:
+            cfg = self._get_tts_cfg()
+            if not cfg.get('enabled') or not text:
+                return
+            if cfg.get('interrupt'):
+                self._tts_clear_queue()
+                self._tts_stop_current()
+                self._tts_start_playback(text, cfg)
+                return
+            if self._tts_is_busy():
+                self._tts_queue.append(text)
+                self._ensure_tts_timer()
+                return
+            self._tts_start_playback(text, cfg)
         except Exception:
             pass
 
@@ -962,17 +1065,24 @@ class MainFrame(wx.Frame):
                 self._tts_proc = None
         except Exception:
             self._tts_proc = None
+        try:
+            self._tts_busy = False
+            self._tts_last_active = 0.0
+            if not self._tts_queue:
+                self._stop_tts_timer()
+        except Exception:
+            pass
 
-    def _tts_start_process(self, cmd: list[str]) -> bool:
+    def _tts_start_process(self, cmd: list[str]):
         try:
             import subprocess
             proc = subprocess.Popen(cmd)
             self._tts_proc = proc
-            return True
+            return proc
         except Exception:
-            return False
+            return None
 
-    def _tts_speak_fallback(self, text: str, cfg: dict | None = None):
+    def _tts_speak_fallback(self, text: str, cfg: dict | None = None) -> bool:
         try:
             import sys
             cfg = cfg or self._get_tts_cfg()
@@ -986,7 +1096,7 @@ class MainFrame(wx.Frame):
                 # macOS say expects approximate words per minute via -r
                 cmd += ["-r", str(max(80, min(600, wpm))), text]
                 if self._tts_start_process(cmd):
-                    return
+                    return True
             # Windows: SAPI via PowerShell
             if sys.platform.startswith('win'):
                 rate = self._tts_map_rate(wpm)
@@ -1000,18 +1110,19 @@ class MainFrame(wx.Frame):
                     ps += f"try{{$s.SelectVoice('{voice}')}}catch{{}};"
                 ps += "$s.Speak($t);"
                 if self._tts_start_process(["powershell", "-NoProfile", "-Command", ps]):
-                    return
+                    return True
             # Linux: espeak or spd-say
             cmd = ["espeak", f"-s{max(80,min(600,wpm))}"]
             if voice and voice.lower() != 'default':
                 cmd += ["-v", voice]
             cmd.append(text)
             if self._tts_start_process(cmd):
-                return
+                return True
             if self._tts_start_process(["spd-say", text]):
-                return
+                return True
         except Exception:
             pass
+        return False
 
 
     def _on_focus_input(self, evt):
@@ -1615,6 +1726,12 @@ class MainFrame(wx.Frame):
             except Exception:
                 pass
             self.irc.disconnect()
+            try:
+                self._tts_clear_queue()
+                self._tts_stop_current()
+                self._stop_tts_timer()
+            except Exception:
+                pass
             # Cleanup temp beep files
             try:
                 for p in getattr(self, '_beep_files', {}).values():
