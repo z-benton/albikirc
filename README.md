@@ -13,8 +13,8 @@ A minimal, accessible IRC client using wxPython. Focused on VoiceOver (macOS) an
 - Event bus for decoupling UI and IRC client
 
 ## Requirements
-- Python 3.10 or newer
-- `pip` and a working C/C++ toolchain as required by wxPython on your OS
+- Python 3.12 or newer
+- `pip` and a working C/C++ toolchain as required by wxPython (>=4.2.1) on your OS
   - macOS: Xcode Command Line Tools installed (`xcode-select --install`)
   - Linux: GTK3 and development headers installed (see your distro docs)
   - Windows: Recent CPython + pip; wheels are usually available
@@ -78,6 +78,23 @@ The following creates an isolated virtual environment, installs dependencies, an
 
 ### Gatekeeper
 - Since the app is not code‑signed, macOS may warn on first launch. Bypass by right‑click → Open → Open, or remove quarantine: `xattr -dr com.apple.quarantine dist/Albikirc.app`.
+
+## Build Linux Bundle
+- Script: `./build-linux.sh` builds a PyInstaller bundle at `dist/Albikirc` and a tarball at `dist/Albikirc-linux-<arch>.tar.gz` (skip the tarball with `--no-tar`).
+- Cleanup: use `--clean` to remove `build/`, `dist/`, and the generated spec file.
+
+### Basic Usage
+- Build: `./build-linux.sh`
+- Run: `dist/Albikirc/Albikirc` (onedir default) or `dist/Albikirc` when using `--onefile`
+- Tar output: `dist/Albikirc-linux-<arch>.tar.gz`
+
+### Options
+- `--onefile`: produce a single-file binary instead of the onedir layout
+- `--icon path`: include a custom icon (`.png` or `.ico`)
+- `--python /path/to/python3`: use a specific Python 3 interpreter
+- `--no-tar`: skip creating the tarball
+
+Linux notes: ensure GTK3 runtime and development headers are installed so wxPython can run or build wheels.
 
 ## Shortcuts
 - Connect: Cmd/Ctrl+N

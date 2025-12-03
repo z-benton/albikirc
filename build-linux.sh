@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Build a macOS .app bundle for albikirc using PyInstaller,
-# clean duplicates so only the .app remains, and create a zip.
+# Build a Linux bundle for albikirc using PyInstaller.
+# Produces an onedir folder by default and an optional tar.gz artifact.
 
 APP_NAME="Albikirc"
 ENTRYPOINT="albikirc/app.py"
@@ -18,19 +18,20 @@ Usage: $(basename "$0") [options]
 Options:
   --clean                 Remove build artifacts and exit
   --python PATH           Use a specific Python 3.x interpreter
-  --icon PATH             Optional .icns icon to include
-  --no-zip                Skip creating the .zip archive
+  --icon PATH             Optional .png/.ico icon to include
+  --onefile               Build a single-file binary instead of onedir
+  --no-tar                Skip creating the .tar.gz archive
   -h, --help              Show this help
 
 Notes:
-  - Architecture is determined by the Python you use (arm64 vs x86_64).
-    For Intel builds on Apple Silicon, run with an x86_64 Python under Rosetta,
-    e.g. 'arch -x86_64 ./build-macos.sh --python /usr/local/bin/python3'.
+  - Requires GTK3 and related development libraries for wxPython.
+  - The output is built for the host architecture (e.g., x86_64, aarch64).
 USAGE
 }
 
 ICON_PATH=""
-MAKE_ZIP=1
+MAKE_TAR=1
+ONEFILE=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,10 +48,13 @@ while [[ $# -gt 0 ]]; do
     --icon)
       shift
       ICON_PATH="${1:-}"
-      [[ -n "${ICON_PATH}" && -f "${ICON_PATH}" ]] || { echo "--icon requires an existing .icns path" >&2; exit 2; }
+      [[ -n "${ICON_PATH}" && -f "${ICON_PATH}" ]] || { echo "--icon requires an existing icon path" >&2; exit 2; }
       ;;
-    --no-zip)
-      MAKE_ZIP=0
+    --onefile)
+      ONEFILE=1
+      ;;
+    --no-tar)
+      MAKE_TAR=0
       ;;
     -h|--help)
       usage; exit 0
@@ -183,7 +187,7 @@ fi
 echo "[build] Cleaning previous build artifacts"
 rm -rf build
 mkdir -p dist
-rm -rf "dist/${APP_NAME}.app" "dist/${APP_NAME}"
+rm -rf "dist/${APP_NAME}" "dist/${APP_NAME}.tar.gz" "${APP_NAME}.spec"
 
 echo "[build] Running PyInstaller"
 PI_ARGS=(
@@ -196,37 +200,28 @@ if [[ -n "$ICON_PATH" ]]; then
   PI_ARGS+=( --icon "$ICON_PATH" )
 fi
 
+if [[ $ONEFILE -eq 1 ]]; then
+  PI_ARGS+=( --onefile )
+fi
+
 PI_ARGS+=( --add-data "${SOUNDS_DIR}:Sounds" "${ENTRYPOINT}" )
 
 # Constrain PyInstaller cache into workspace (sandbox-safe)
 export PYINSTALLER_CACHE_DIR="${PWD}/.pyinstaller-cache"
+export XDG_CACHE_HOME="${PYINSTALLER_CACHE_DIR}"
 mkdir -p "${PYINSTALLER_CACHE_DIR}"
-# Also sandbox HOME so PyInstaller's macOS cache under ~/Library/... stays inside workspace
 export HOME="${PWD}/.home"
 mkdir -p "${HOME}"
 
 "${PYTHON_BIN}" -m PyInstaller "${PI_ARGS[@]}"
 
-echo "[build] Removing duplicate onedir folder (keeping only .app)"
-rm -rf "dist/${APP_NAME}"
-
 ARCH="$(uname -m)"
-if [[ $MAKE_ZIP -eq 1 ]]; then
-  ZIP_PATH="dist/${APP_NAME}-macOS-${ARCH}.zip"
-  echo "[pack] Creating zip at ${ZIP_PATH}"
-  rm -f "$ZIP_PATH"
-  (
-    cd dist
-    # Prefer ditto for better macOS metadata; fallback to zip
-    if command -v ditto >/dev/null 2>&1; then
-      ditto -ck --keepParent "${APP_NAME}.app" "${APP_NAME}-macOS-${ARCH}.zip" 2>/dev/null || \
-        zip -qr "${APP_NAME}-macOS-${ARCH}.zip" "${APP_NAME}.app"
-    else
-      zip -qr "${APP_NAME}-macOS-${ARCH}.zip" "${APP_NAME}.app"
-    fi
-  )
-  echo "[done] App: dist/${APP_NAME}.app"
-  echo "[done] Zip: ${ZIP_PATH}"
+if [[ $MAKE_TAR -eq 1 ]]; then
+  TARBALL="dist/${APP_NAME}-linux-${ARCH}.tar.gz"
+  echo "[pack] Creating tarball at ${TARBALL}"
+  rm -f "$TARBALL"
+  tar -czf "$TARBALL" -C dist "${APP_NAME}"
+  echo "[done] Binary: dist/${APP_NAME} (tarball at ${TARBALL})"
 else
-  echo "[done] App: dist/${APP_NAME}.app (zip disabled)"
+  echo "[done] Binary: dist/${APP_NAME}"
 fi

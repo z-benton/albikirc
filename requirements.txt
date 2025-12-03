@@ -1,2 +1,1 @@
-wxPython
-
+wxPython>=4.2.1
