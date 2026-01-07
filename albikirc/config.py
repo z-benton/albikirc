@@ -40,6 +40,7 @@ CONFIG_PATH = APP_DIR / "config.json"
 
 DEFAULTS: Dict[str, Any] = {
     "nick": "guest",
+    "realname": "",
     "appearance": {
         "theme": "system",  # one of: system, light, dark
         "timestamps": True,

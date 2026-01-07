@@ -21,6 +21,7 @@ class IRCClient:
 
     connected: bool = field(default=False, init=False)
     nick: str | None = field(default=None, init=False)
+    real_name: str | None = field(default=None, init=False)
     # Auth / TLS extras
     sasl_enabled: bool = field(default=False)
     sasl_username: str | None = field(default=None)
@@ -147,10 +148,15 @@ class IRCClient:
     def _send_ctcp_reply(self, nick: str, cmd: str, args: str = ""):
         payload = f"\x01{cmd}{(' ' + args) if args else ''}\x01"
         self._send_raw(f"NOTICE {nick} :{payload}")
+
+    def _registration_realname(self) -> str:
+        real_name = (self.real_name or "").strip()
+        return real_name or "albikirc"
+
     def _send_registration(self):
         if not self._reg_sent and self.nick:
             self._send_raw(f"NICK {self.nick}")
-            self._send_raw(f"USER {self.nick} 0 * :albikirc")
+            self._send_raw(f"USER {self.nick} 0 * :{self._registration_realname()}")
             self._reg_sent = True
 
     def _reader_loop(self):
@@ -489,9 +495,10 @@ class IRCClient:
     # RPL_ENDOFNAMES (366) could be handled to signal completion
 
     # Public API
-    def connect(self, host: str, port: int, nick: str, *, use_tls: bool = True):
+    def connect(self, host: str, port: int, nick: str, *, real_name: str | None = None, use_tls: bool = True):
         self.disconnect()
         self.nick = nick
+        self.real_name = (real_name or "").strip() or None
         self._reg_sent = False
         self._cap_in_progress = False
         self._awaiting_auth_plus = False
@@ -552,7 +559,7 @@ class IRCClient:
             else:
                 # No SASL: send registration now
                 self._send_raw(f"NICK {nick}")
-                self._send_raw(f"USER {nick} 0 * :albikirc")
+                self._send_raw(f"USER {nick} 0 * :{self._registration_realname()}")
                 self._reg_sent = True
         except Exception as e:
             self.connected = False

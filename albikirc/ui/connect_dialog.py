@@ -2,7 +2,7 @@ import wx
 
 
 class ConnectDialog(wx.Dialog):
-    def __init__(self, parent, host_default="", port_default=6667, nick_default="", use_tls_default=False, tcp_keepalive_default=True, enable_save=True):
+    def __init__(self, parent, host_default="", port_default=6667, nick_default="", realname_default="", use_tls_default=False, tcp_keepalive_default=True, enable_save=True):
         super().__init__(parent, title="Connect to IRC")
         self.SetName("Connect dialog")
 
@@ -21,6 +21,11 @@ class ConnectDialog(wx.Dialog):
         self.nick_ctrl = wx.TextCtrl(self, value=str(nick_default))
         self.nick_ctrl.SetName("Nick field")
         self.nick_ctrl.SetToolTip("Nickname to use on this server")
+
+        realname_label = wx.StaticText(self, label="Real name (optional):")
+        self.realname_ctrl = wx.TextCtrl(self, value=str(realname_default))
+        self.realname_ctrl.SetName("Real name field")
+        self.realname_ctrl.SetToolTip("Real name/GEcos sent during registration")
 
         pass_label = wx.StaticText(self, label="Server password (optional, not saved):")
         self.pass_ctrl = wx.TextCtrl(self, style=wx.TE_PASSWORD)
@@ -84,6 +89,7 @@ class ConnectDialog(wx.Dialog):
             (host_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.host_ctrl, 1, wx.EXPAND),
             (port_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.port_ctrl, 0),
             (nick_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.nick_ctrl, 1, wx.EXPAND),
+            (realname_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.realname_ctrl, 1, wx.EXPAND),
             (pass_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.pass_ctrl, 1, wx.EXPAND),
             (wx.StaticText(self, label=""), 0), (self.tls_checkbox, 0),
             (wx.StaticText(self, label=""), 0), (self.keepalive_checkbox, 0),
@@ -180,6 +186,10 @@ class ConnectDialog(wx.Dialog):
     @property
     def nick(self) -> str:
         return self.nick_ctrl.GetValue().strip()
+
+    @property
+    def real_name(self) -> str:
+        return self.realname_ctrl.GetValue().strip()
 
     @property
     def use_tls(self) -> bool:

@@ -638,14 +638,16 @@ class MainFrame(wx.Frame):
     def _on_connect(self, evt):
         # Use stored nick as the default in the dialog
         nick_default = self.settings.get('nick', '')
+        realname_default = self.settings.get('realname', '')
         # Default keepalive from preferences
         conn = self.settings.get('connection', {})
         tcp_keepalive_default = bool(conn.get('tcp_keepalive_enabled', True))
-        dlg = ConnectDialog(self, nick_default=nick_default, tcp_keepalive_default=tcp_keepalive_default)
+        dlg = ConnectDialog(self, nick_default=nick_default, realname_default=realname_default, tcp_keepalive_default=tcp_keepalive_default)
         if dlg.ShowModal() == wx.ID_OK:
             host = dlg.host
             port = dlg.port
             nick = dlg.nick
+            real_name = getattr(dlg, 'real_name', '')
             use_tls = dlg.use_tls
             tcp_keepalive = getattr(dlg, 'tcp_keepalive_enabled', False)
             server_password = getattr(dlg, 'server_password', '')
@@ -659,8 +661,9 @@ class MainFrame(wx.Frame):
                 self.irc.tls_client_keyfile = getattr(dlg, 'keyfile', '') or None
                 self.irc.enable_tcp_keepalive = bool(tcp_keepalive)
                 self.irc.server_password = server_password or None
-                self.irc.connect(host, port, nick, use_tls=use_tls)
+                self.irc.connect(host, port, nick, real_name=real_name, use_tls=use_tls)
                 self.settings['nick'] = nick
+                self.settings['realname'] = real_name
                 # Save server if requested
                 try:
                     do_save = getattr(dlg, 'save_server', False)
@@ -668,6 +671,7 @@ class MainFrame(wx.Frame):
                         servers = list(self.settings.get('servers', []))
                         entry = {
                             'name': name, 'host': host, 'port': port, 'use_tls': bool(use_tls), 'nick': nick,
+                            'real_name': real_name,
                             'sasl_enabled': getattr(dlg, 'sasl_enabled', False),
                             'sasl_username': getattr(dlg, 'sasl_username', ''),
                             'tls_client_certfile': getattr(dlg, 'certfile', ''),
@@ -737,7 +741,10 @@ class MainFrame(wx.Frame):
                             continue
                         dup = any((x.get('host')==host and int(x.get('port',0))==int(port) and bool(x.get('use_tls',True))==tls and (x.get('name') or x.get('host',''))==name) for x in servers)
                         if not dup:
-                            servers.append({'name': name, 'host': host, 'port': int(port), 'use_tls': tls, 'nick': s.get('nick','')})
+                            servers.append({
+                                'name': name, 'host': host, 'port': int(port), 'use_tls': tls,
+                                'nick': s.get('nick',''), 'real_name': s.get('real_name',''),
+                            })
                             added += 1
                     self.settings['servers'] = servers
                     save(self.settings)
@@ -756,6 +763,7 @@ class MainFrame(wx.Frame):
                 host = sel.get('host','')
                 port = int(sel.get('port', 6697))
                 nick = sel.get('nick', self.settings.get('nick',''))
+                real_name = sel.get('real_name', self.settings.get('realname',''))
                 use_tls = bool(sel.get('use_tls', True))
                 if host and nick:
                     # Apply saved extras
@@ -767,8 +775,9 @@ class MainFrame(wx.Frame):
                     self.irc.enable_tcp_keepalive = bool(sel.get('tcp_keepalive', True))
                     # Server password is not stored; default empty unless provided in entry
                     self.irc.server_password = sel.get('server_password', '') or None
-                    self.irc.connect(host, port, nick, use_tls=use_tls)
+                    self.irc.connect(host, port, nick, real_name=real_name, use_tls=use_tls)
                     self.settings['nick'] = nick
+                    self.settings['realname'] = real_name
                     self.SetStatusText(f"Connecting to {host}:{port} as {nick}{' with TLS' if use_tls else ''}")
         # Persist any removals the dialog made
         self.settings['servers'] = list(dlg._servers)
