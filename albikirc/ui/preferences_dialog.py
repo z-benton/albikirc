@@ -56,6 +56,11 @@ class PreferencesDialog(wx.Dialog):
         self.txt_nick.SetName("Nick field")
         self.txt_nick.SetToolTip("Default nickname to use when connecting")
 
+        # --- Real name ---
+        self.txt_realname = wx.TextCtrl(p_id, value=self._settings.get('realname', ''))
+        self.txt_realname.SetName("Real name field")
+        self.txt_realname.SetToolTip("Optional real name/GEcos used during registration")
+
         # --- Sounds ---
         snd = self._settings.get('sounds', {})
         self.chk_sounds_enabled = wx.CheckBox(p_snd, label="Enable sounds (optional)")
@@ -206,6 +211,10 @@ class PreferencesDialog(wx.Dialog):
         rown.Add(wx.StaticText(p_id, label="Nick:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         rown.Add(self.txt_nick, 1, wx.EXPAND)
         s_id.Add(rown, 0, wx.EXPAND | wx.ALL, 8)
+        rowr = wx.BoxSizer(wx.HORIZONTAL)
+        rowr.Add(wx.StaticText(p_id, label="Real name (optional):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        rowr.Add(self.txt_realname, 1, wx.EXPAND)
+        s_id.Add(rowr, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
         p_id.SetSizer(s_id)
 
         # CTCP
@@ -905,6 +914,7 @@ class PreferencesDialog(wx.Dialog):
     def values(self):
         return {
             'nick': self.txt_nick.GetValue().strip(),
+            'realname': self.txt_realname.GetValue().strip(),
             'appearance': {
                 'timestamps': self.chk_timestamps.GetValue(),
                 'theme': ["system", "light", "dark"][max(0, self.choice_theme.GetSelection())],

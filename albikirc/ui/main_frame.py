@@ -795,6 +795,7 @@ class MainFrame(wx.Frame):
         if dlg.ShowModal() == wx.ID_OK:
             vals = dlg.values
             self.settings['nick'] = vals.get('nick', self.settings.get('nick',''))
+            self.settings['realname'] = vals.get('realname', self.settings.get('realname',''))
             self.settings['appearance'] = vals.get('appearance', self.settings.get('appearance', {}))
             self.settings['ctcp'] = vals.get('ctcp', self.settings.get('ctcp', {}))
             self.settings['notifications'] = vals.get('notifications', self.settings.get('notifications', {}))
