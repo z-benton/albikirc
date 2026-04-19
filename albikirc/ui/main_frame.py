@@ -7,6 +7,7 @@ import wx.adv
 from .chat_panel import ChatPanel
 from ..irc_client import IRCClient
 from ..config import save, _default_sound_path
+from ..mac_speech import MacSpeechBackend
 from .connect_dialog import ConnectDialog
 from .preferences_dialog import PreferencesDialog
 from .saved_servers_dialog import SavedServersDialog
@@ -35,10 +36,9 @@ class MainFrame(wx.Frame):
         # Experimental beeps
         self._beeps_enabled = bool(self.settings.get('beeps', {}).get('enabled', False))
         self._tts_proc = None
-        self._tts_say_proc = None
+        self._tts_av = None
         self._tts_queue = deque()
         self._tts_busy = False
-        self._tts_busy_until = 0.0
         self._tts_last_active = 0.0
         self._tts_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._on_tts_timer, self._tts_timer)
@@ -469,6 +469,25 @@ class MainFrame(wx.Frame):
         macOS uses `say -v ?`. Other OS return names only via wx TTS if available.
         """
         out = []
+        try:
+            import sys
+            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
+                backend = self._tts_get_av_backend()
+                for voice in backend.available_voices():
+                    nm = str(voice.get('name') or 'Voice')
+                    lang = str(voice.get('lang') or '')
+                    desc = str(voice.get('desc') or '')
+                    out.append({'name': nm, 'lang': lang, 'desc': desc, 'eloquence': self._is_eloquence_name(nm)})
+                if out:
+                    seen = set(); dedup = []
+                    for v in out:
+                        key = (v.get('name'), v.get('lang') or '')
+                        if key in seen:
+                            continue
+                        seen.add(key); dedup.append(v)
+                    return dedup
+        except Exception:
+            pass
         try:
             # Try wx.TextToSpeech first
             TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
@@ -902,21 +921,21 @@ class MainFrame(wx.Frame):
             TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
             if TTS is None:
                 self._tts = None
-                return
-            if not hasattr(self, '_tts') or self._tts is None:
+            elif not hasattr(self, '_tts') or self._tts is None:
                 self._tts = TTS()
             # Apply voice and rate if possible
             self._tts_apply_settings()
         except Exception:
             self._tts = None
         try:
-            self._tts_busy_until = 0.0
-            if self._tts_should_use_mac_say_helper(cfg):
-                self._tts_ensure_mac_say_helper(cfg)
-            else:
-                self._tts_stop_mac_say_helper()
+            self._tts_av = self._tts_get_av_backend() if MacSpeechBackend.is_available() else None
         except Exception:
-            pass
+            self._tts_av = None
+
+    def _tts_get_av_backend(self):
+        if getattr(self, '_tts_av', None) is None:
+            self._tts_av = MacSpeechBackend()
+        return self._tts_av
 
     def _tts_apply_settings(self):
         cfg = self._get_tts_cfg()
@@ -1005,7 +1024,9 @@ class MainFrame(wx.Frame):
         except Exception:
             self._tts_proc = None
         try:
-            if getattr(self, '_tts_say_proc', None) and (time.time() < float(self._tts_busy_until or 0.0)):
+            backend = getattr(self, '_tts_av', None)
+            if backend and backend.is_speaking():
+                self._tts_last_active = time.time()
                 return True
         except Exception:
             pass
@@ -1019,12 +1040,20 @@ class MainFrame(wx.Frame):
         return False
 
     def _tts_start_playback(self, text: str, cfg: dict):
-        import sys
         started = False
         if self._tts_use_voiceover_announcements(cfg):
             started = self._tts_speak_via_voiceover(text)
-        if not started and (self._tts_should_use_mac_say_helper(cfg) or sys.platform == 'darwin'):
-            started = self._tts_speak_via_mac_say_helper(text, cfg)
+        if not started and MacSpeechBackend.is_available():
+            try:
+                backend = self._tts_get_av_backend()
+                started = backend.speak(
+                    text,
+                    voice_name=str(cfg.get('voice', 'Default') or 'Default'),
+                    language=str(cfg.get('language', '') or ''),
+                    rate_wpm=int(cfg.get('rate_wpm', 180)),
+                )
+            except Exception:
+                started = False
         if not started and self._tts_prefer_process_backend(cfg):
             started = self._tts_speak_fallback(text, cfg)
         try:
@@ -1039,11 +1068,9 @@ class MainFrame(wx.Frame):
         self._tts_busy = bool(started)
         if started:
             self._tts_last_active = time.time()
-            self._tts_busy_until = max(float(self._tts_busy_until or 0.0), self._tts_last_active + 0.1)
             self._ensure_tts_timer()
         else:
             self._tts_busy = False
-            self._tts_busy_until = 0.0
 
     def _on_tts_timer(self, evt):
         try:
@@ -1112,11 +1139,15 @@ class MainFrame(wx.Frame):
                     self._tts_proc = None
         except Exception:
             self._tts_proc = None
-        self._tts_stop_mac_say_helper()
+        try:
+            backend = getattr(self, '_tts_av', None)
+            if backend:
+                backend.stop()
+        except Exception:
+            pass
         try:
             self._tts_busy = False
             self._tts_last_active = 0.0
-            self._tts_busy_until = 0.0
             if not self._tts_queue:
                 self._stop_tts_timer()
         except Exception:
@@ -1139,7 +1170,7 @@ class MainFrame(wx.Frame):
             language = str(cfg.get('language', '') or '').strip()
             # macOS voice names come from `say -v ?`, so use `say` for reliable matching.
             if sys.platform == 'darwin':
-                return not self._tts_should_use_mac_say_helper(cfg)
+                return not MacSpeechBackend.is_available()
             # On other platforms, a specific voice/language choice is more likely to
             # work via the OS-native command path than via wx's generic wrapper.
             return voice.lower() != 'default' or bool(language)
@@ -1155,112 +1186,7 @@ class MainFrame(wx.Frame):
             return False
 
     def _tts_should_use_mac_say_helper(self, cfg: dict | None = None) -> bool:
-        try:
-            import sys
-            cfg = cfg or self._get_tts_cfg()
-            return sys.platform == 'darwin' and not bool(cfg.get('use_voiceover', False))
-        except Exception:
-            return False
-
-    def _tts_mac_say_helper_key(self, cfg: dict) -> tuple[str, int]:
-        voice = str(cfg.get('voice', 'Default') or 'Default').strip()
-        try:
-            wpm = int(cfg.get('rate_wpm', 180))
-        except Exception:
-            wpm = 180
-        return (voice, max(80, min(600, wpm)))
-
-    def _tts_ensure_mac_say_helper(self, cfg: dict) -> bool:
-        try:
-            import os
-            import pty
-            import subprocess
-            key = self._tts_mac_say_helper_key(cfg)
-            if getattr(self, '_tts_say_proc', None) is not None and getattr(self, '_tts_say_cfg_key', None) == key:
-                if self._tts_say_proc.poll() is None:
-                    return True
-                self._tts_say_proc = None
-            self._tts_stop_mac_say_helper()
-            voice, rate = key
-            cmd = ["say", "-i", "-r", str(rate)]
-            if voice and voice.lower() != 'default':
-                cmd[1:1] = ["-v", voice]
-            master_fd, slave_fd = pty.openpty()
-            self._tts_say_proc = subprocess.Popen(
-                cmd,
-                stdin=slave_fd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                close_fds=True,
-            )
-            os.close(slave_fd)
-            self._tts_say_master_fd = master_fd
-            self._tts_say_cfg_key = key
-            return True
-        except Exception:
-            try:
-                os.close(getattr(self, '_tts_say_master_fd', -1))
-            except Exception:
-                pass
-            self._tts_say_proc = None
-            self._tts_say_master_fd = None
-            self._tts_say_cfg_key = None
-            return False
-
-    def _tts_stop_mac_say_helper(self):
-        try:
-            import os
-            master_fd = getattr(self, '_tts_say_master_fd', None)
-            if master_fd is not None:
-                try:
-                    os.close(master_fd)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        try:
-            proc = getattr(self, '_tts_say_proc', None)
-            if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        self._tts_say_proc = None
-        self._tts_say_master_fd = None
-        self._tts_say_cfg_key = None
-
-    def _tts_estimate_duration(self, text: str, cfg: dict | None = None) -> float:
-        try:
-            cfg = cfg or self._get_tts_cfg()
-            wpm = max(80, min(600, int(cfg.get('rate_wpm', 180))))
-        except Exception:
-            wpm = 180
-        words = max(1, len((text or "").split()))
-        return min(15.0, max(0.6, (words / float(wpm)) * 60.0 + 0.35))
-
-    def _tts_speak_via_mac_say_helper(self, text: str, cfg: dict) -> bool:
-        try:
-            import os
-            if not self._tts_ensure_mac_say_helper(cfg):
-                return False
-            proc = getattr(self, '_tts_say_proc', None)
-            master_fd = getattr(self, '_tts_say_master_fd', None)
-            if not proc or master_fd is None or proc.poll() is not None:
-                return False
-            payload = ((text or "").replace("\r", " ").replace("\n", " ") + "\n").encode("utf-8", errors="ignore")
-            os.write(master_fd, payload)
-            now = time.time()
-            self._tts_last_active = now
-            self._tts_busy_until = now + self._tts_estimate_duration(text, cfg)
-            return True
-        except Exception:
-            self._tts_stop_mac_say_helper()
-            return False
+        return False
 
     def _tts_build_voiceover_script(self, text: str) -> str:
         safe = (text or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")

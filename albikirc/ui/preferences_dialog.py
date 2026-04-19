@@ -1,6 +1,7 @@
 import sys
 
 import wx
+from ..mac_speech import MacSpeechBackend
 
 class PreferencesDialog(wx.Dialog):
     def __init__(self, parent, settings):
@@ -397,6 +398,14 @@ class PreferencesDialog(wx.Dialog):
     # --- TTS helpers ---
     def _tts_get_voices(self) -> list[str]:
         try:
+            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
+                names = [str(v.get('name') or 'Voice') for v in MacSpeechBackend().available_voices()]
+                if names:
+                    seen = set(); out = []
+                    for n in names:
+                        if n not in seen:
+                            seen.add(n); out.append(n)
+                    return out
             # 1) Prefer wx.TextToSpeech enumeration
             TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
             if TTS is not None:
@@ -597,7 +606,16 @@ class PreferencesDialog(wx.Dialog):
         out = []
         try:
             import sys, subprocess
-            if sys.platform == 'darwin':
+            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
+                for voice in MacSpeechBackend().available_voices():
+                    nm = str(voice.get('name') or 'Voice')
+                    out.append({
+                        'name': nm,
+                        'lang': str(voice.get('lang') or ''),
+                        'desc': str(voice.get('desc') or ''),
+                        'eloquence': nm.lower() in {'eddy','flo','grandma','grandpa','reed','rocko','sandy','shelley','shelly','glen','glenn'},
+                    })
+            elif sys.platform == 'darwin':
                 p = subprocess.Popen(["say", "-v", "?"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 txt, _ = p.communicate(timeout=3)
                 for ln in (txt or '').splitlines():
@@ -836,6 +854,19 @@ class PreferencesDialog(wx.Dialog):
     def _on_tts_test(self, evt):
         try:
             sample = "This is a test of text to speech."
+            if sys.platform == 'darwin' and MacSpeechBackend.is_available() and not self.chk_tts_voiceover.GetValue():
+                backend = getattr(self, '_tts_av_test_backend', None)
+                if backend is None:
+                    backend = MacSpeechBackend()
+                    self._tts_av_test_backend = backend
+                backend.stop()
+                if backend.speak(
+                    sample,
+                    voice_name=(getattr(self, '_last_tts_voice', '') or 'Default').strip(),
+                    language=str((self._settings.get('tts', {}) or {}).get('language', '')),
+                    rate_wpm=int(self.spin_tts_wpm.GetValue()),
+                ):
+                    return
             if self._tts_prefer_process_backend():
                 cmd = self._tts_build_process_command(sample)
                 if cmd:

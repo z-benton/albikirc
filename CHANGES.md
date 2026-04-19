@@ -21,6 +21,7 @@
 *   Fixed the Eloquence voice submenu so language groups are built correctly and checked accurately.
 *   Reduced macOS speech lag by keeping an Apple `say` helper process alive instead of spawning a fresh speech process for every utterance.
 *   Fixed a macOS TTS regression where the new helper process could stay alive without actually speaking queued text because `say -i` was being driven through a plain pipe instead of a pseudo-terminal.
+*   Replaced the macOS app TTS path with Apple’s modern `AVSpeechSynthesizer` backend via PyObjC so spoken output uses the platform speech framework instead of the older command-line speech fallback.
 
 ### Refactoring
 

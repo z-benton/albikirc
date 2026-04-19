@@ -168,12 +168,16 @@ try:
     import PyInstaller  # noqa: F401
 except Exception:
     ok = False
+try:
+    from AVFoundation import AVSpeechSynthesizer  # noqa: F401
+except Exception:
+    ok = False
 sys.exit(0 if ok else 1)
 PY
 then
-  echo "[deps] Installing wxPython and PyInstaller"
-  if ! "${PYTHON_BIN}" -m pip install -q wxPython pyinstaller; then
-    echo "[error] Failed to install wxPython/PyInstaller. Ensure network access or preinstall in ${VENV_DIR}." >&2
+  echo "[deps] Installing wxPython, PyInstaller, and macOS speech dependencies"
+  if ! "${PYTHON_BIN}" -m pip install -q wxPython pyinstaller pyobjc-framework-Cocoa pyobjc-framework-AVFoundation; then
+    echo "[error] Failed to install build dependencies. Ensure network access or preinstall in ${VENV_DIR}." >&2
     exit 1
   fi
 else
