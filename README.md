@@ -142,6 +142,7 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
 - Sounds: A bundled sound pack is enabled by default with event-specific sounds for messages, mentions, notices, channel messages, and private/query messages. You can point each event to a custom file.
   - Playback interrupts in-flight clips so new alerts are heard immediately.
   - Experimental: Optional synthesized beep tones (ascending on send, descending on receive) remain opt-in.
+- Text to Speech: On macOS, the app uses Apple’s `say` command path for selected voices and keeps a helper process alive to reduce per-message startup lag. An experimental option can try routing announcements through VoiceOver when VoiceOver is enabled and allowed to be controlled with AppleScript.
 
 ## Behavior Details
 - Message tags: The client strips IRCv3 message tags (lines starting with `@`) for robust parsing, so messages from servers with tags display correctly.

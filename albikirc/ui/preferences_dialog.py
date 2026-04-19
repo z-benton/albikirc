@@ -1,3 +1,5 @@
+import sys
+
 import wx
 
 class PreferencesDialog(wx.Dialog):
@@ -143,6 +145,12 @@ class PreferencesDialog(wx.Dialog):
         self.chk_tts_interrupt.SetName("Interrupt TTS checkbox")
         self.chk_tts_interrupt.SetToolTip("Stop any ongoing speech when another event needs to speak")
         self.chk_tts_interrupt.SetValue(bool(tts_cfg.get('interrupt', False)))
+        self.chk_tts_voiceover = wx.CheckBox(p_tts, label="Experimental: announce via VoiceOver when available (macOS)")
+        self.chk_tts_voiceover.SetName("Use VoiceOver for TTS checkbox")
+        self.chk_tts_voiceover.SetToolTip("Use VoiceOver announcements instead of the app speech voice when available. Requires VoiceOver and AppleScript control to be enabled.")
+        self.chk_tts_voiceover.SetValue(bool(tts_cfg.get('use_voiceover', False)))
+        if sys.platform != 'darwin':
+            self.chk_tts_voiceover.Disable()
 
         # Voice selection: replace dropdown with Choose Voice… (grouped submenu)
         sel_voice = str(tts_cfg.get('voice', 'Default'))
@@ -347,6 +355,7 @@ class PreferencesDialog(wx.Dialog):
         s_tts.Add(help_tts, 0, wx.ALL, 6)
         s_tts.Add(self.chk_tts_enabled, 0, wx.ALL, 6)
         s_tts.Add(self.chk_tts_interrupt, 0, wx.LEFT | wx.RIGHT, 12)
+        s_tts.Add(self.chk_tts_voiceover, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
         row_voice = wx.BoxSizer(wx.HORIZONTAL)
         row_voice.Add(wx.StaticText(p_tts, label="Voice:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         row_voice.Add(self.txt_tts_voice, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
@@ -981,6 +990,7 @@ class PreferencesDialog(wx.Dialog):
                 # Preserve language preference chosen via macOS Speech menu
                 'language': str((self._settings.get('tts', {}) or {}).get('language', '')),
                 'rate_wpm': int(self.spin_tts_wpm.GetValue()),
+                'use_voiceover': self.chk_tts_voiceover.GetValue(),
                 'events': {
                     'channel_message': self.chk_tts_channel.GetValue(),
                     'private_message': self.chk_tts_private.GetValue(),

@@ -61,6 +61,20 @@ DEFAULTS: Dict[str, Any] = {
         "activity_window_seconds": 10,
         "notices_inline": True,
     },
+    "tts": {
+        "enabled": False,
+        "interrupt": False,
+        "voice": "Default",
+        "language": "",
+        "rate_wpm": 180,
+        "use_voiceover": False,
+        "events": {
+            "channel_message": False,
+            "private_message": False,
+            "mention": True,
+            "notice": False,
+        },
+    },
     "sounds": {
         "enabled": bool(_DEFAULT_SOUND_DIR),
         "message": _default_sound_path("receive.wav"),

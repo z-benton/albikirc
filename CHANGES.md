@@ -6,6 +6,7 @@
 
 *   Added support for joining channels with keys.
 *   Added a Text-to-Speech preference to interrupt ongoing speech so incoming messages speak immediately without piling up.
+*   Added an experimental macOS option to route app announcements through VoiceOver when VoiceOver AppleScript control is enabled.
 
 ### Bug Fixes
 
@@ -18,6 +19,7 @@
 *   Fixed event-bus subscriptions leaking across frame lifecycles by unsubscribing handlers during teardown.
 *   Fixed the macOS TTS voice path so runtime speech and “Test Speech” consistently use the same backend as the voice list shown in the UI.
 *   Fixed the Eloquence voice submenu so language groups are built correctly and checked accurately.
+*   Reduced macOS speech lag by keeping an Apple `say` helper process alive instead of spawning a fresh speech process for every utterance.
 
 ### Refactoring
 
