@@ -854,6 +854,15 @@ class PreferencesDialog(wx.Dialog):
     def _on_tts_test(self, evt):
         try:
             sample = "This is a test of text to speech."
+            if self.chk_tts_voiceover.GetValue():
+                if self._tts_test_via_voiceover(sample):
+                    return
+                wx.MessageBox(
+                    "VoiceOver test failed. Make sure VoiceOver is running and AppleScript control is enabled.",
+                    "TTS",
+                    wx.OK | wx.ICON_WARNING,
+                )
+                return
             if sys.platform == 'darwin' and MacSpeechBackend.is_available() and not self.chk_tts_voiceover.GetValue():
                 backend = getattr(self, '_tts_av_test_backend', None)
                 if backend is None:
@@ -932,6 +941,25 @@ class PreferencesDialog(wx.Dialog):
             wx.MessageBox("Text-to-speech engine not available.", "TTS", wx.OK | wx.ICON_WARNING)
         except Exception as e:
             wx.MessageBox(f"TTS error: {e}", "TTS", wx.OK | wx.ICON_ERROR)
+
+    def _tts_test_via_voiceover(self, text: str) -> bool:
+        try:
+            import subprocess
+            safe = (text or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
+            script = (
+                'var vo = Application("/System/Library/CoreServices/VoiceOver.app");\n'
+                f'vo.output("{safe}");\n'
+            )
+            proc = subprocess.run(
+                ["osascript", "-l", "JavaScript", "-"],
+                input=script,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
 
     def _tts_prefer_process_backend(self) -> bool:
         try:

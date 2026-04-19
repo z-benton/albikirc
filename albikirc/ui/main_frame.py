@@ -1030,6 +1030,11 @@ class MainFrame(wx.Frame):
                 return True
         except Exception:
             pass
+        try:
+            if float(getattr(self, '_tts_busy_until', 0.0) or 0.0) > time.time():
+                return True
+        except Exception:
+            pass
         # Give recently started speech a short grace window even if the backend
         # does not expose speaking state.
         try:
@@ -1148,6 +1153,7 @@ class MainFrame(wx.Frame):
         try:
             self._tts_busy = False
             self._tts_last_active = 0.0
+            self._tts_busy_until = 0.0
             if not self._tts_queue:
                 self._stop_tts_timer()
         except Exception:
@@ -1214,6 +1220,15 @@ class MainFrame(wx.Frame):
             return True
         except Exception:
             return False
+
+    def _tts_estimate_duration(self, text: str, cfg: dict | None = None) -> float:
+        try:
+            cfg = cfg or self._get_tts_cfg()
+            wpm = max(60, int(cfg.get('rate_wpm', 180)))
+            words = max(1, len((text or "").split()))
+            return max(0.75, (words / float(wpm)) * 60.0 + 0.35)
+        except Exception:
+            return 1.5
 
     def _tts_build_process_command(self, text: str, cfg: dict | None = None) -> list[str] | None:
         try:
@@ -1879,8 +1894,9 @@ class MainFrame(wx.Frame):
                             pass
             except Exception:
                 pass
-        finally:
-            return super().Destroy()
+        except Exception:
+            pass
+        return super().Destroy()
 
     def Close(self, force=False):
         try:
@@ -1895,8 +1911,9 @@ class MainFrame(wx.Frame):
             except Exception:
                 pass
             self.irc.disconnect()
-        finally:
-            return super().Close(force)
+        except Exception:
+            pass
+        return super().Close(force)
 
     def _on_toggle_timestamps(self, evt):
         try:
