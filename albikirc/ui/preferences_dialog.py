@@ -854,16 +854,10 @@ class PreferencesDialog(wx.Dialog):
     def _on_tts_test(self, evt):
         try:
             sample = "This is a test of text to speech."
-            if self.chk_tts_voiceover.GetValue():
-                if self._tts_test_via_voiceover(sample):
-                    return
-                wx.MessageBox(
-                    "VoiceOver test failed. Make sure VoiceOver is running and AppleScript control is enabled.",
-                    "TTS",
-                    wx.OK | wx.ICON_WARNING,
-                )
+            voiceover_requested = sys.platform == 'darwin' and self.chk_tts_voiceover.GetValue()
+            if voiceover_requested and self._tts_test_via_voiceover(sample):
                 return
-            if sys.platform == 'darwin' and MacSpeechBackend.is_available() and not self.chk_tts_voiceover.GetValue():
+            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
                 backend = getattr(self, '_tts_av_test_backend', None)
                 if backend is None:
                     backend = MacSpeechBackend()
