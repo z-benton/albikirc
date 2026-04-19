@@ -20,6 +20,7 @@
 *   Fixed the macOS TTS voice path so runtime speech and “Test Speech” consistently use the same backend as the voice list shown in the UI.
 *   Fixed the Eloquence voice submenu so language groups are built correctly and checked accurately.
 *   Reduced macOS speech lag by keeping an Apple `say` helper process alive instead of spawning a fresh speech process for every utterance.
+*   Fixed a macOS TTS regression where the new helper process could stay alive without actually speaking queued text because `say -i` was being driven through a plain pipe instead of a pseudo-terminal.
 
 ### Refactoring
 

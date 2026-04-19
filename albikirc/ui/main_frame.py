@@ -1172,6 +1172,8 @@ class MainFrame(wx.Frame):
 
     def _tts_ensure_mac_say_helper(self, cfg: dict) -> bool:
         try:
+            import os
+            import pty
             import subprocess
             key = self._tts_mac_say_helper_key(cfg)
             if getattr(self, '_tts_say_proc', None) is not None and getattr(self, '_tts_say_cfg_key', None) == key:
@@ -1183,21 +1185,39 @@ class MainFrame(wx.Frame):
             cmd = ["say", "-i", "-r", str(rate)]
             if voice and voice.lower() != 'default':
                 cmd[1:1] = ["-v", voice]
+            master_fd, slave_fd = pty.openpty()
             self._tts_say_proc = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE,
+                stdin=slave_fd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                text=True,
+                close_fds=True,
             )
+            os.close(slave_fd)
+            self._tts_say_master_fd = master_fd
             self._tts_say_cfg_key = key
             return True
         except Exception:
+            try:
+                os.close(getattr(self, '_tts_say_master_fd', -1))
+            except Exception:
+                pass
             self._tts_say_proc = None
+            self._tts_say_master_fd = None
             self._tts_say_cfg_key = None
             return False
 
     def _tts_stop_mac_say_helper(self):
+        try:
+            import os
+            master_fd = getattr(self, '_tts_say_master_fd', None)
+            if master_fd is not None:
+                try:
+                    os.close(master_fd)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         try:
             proc = getattr(self, '_tts_say_proc', None)
             if proc and proc.poll() is None:
@@ -1211,6 +1231,7 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
         self._tts_say_proc = None
+        self._tts_say_master_fd = None
         self._tts_say_cfg_key = None
 
     def _tts_estimate_duration(self, text: str, cfg: dict | None = None) -> float:
@@ -1224,13 +1245,15 @@ class MainFrame(wx.Frame):
 
     def _tts_speak_via_mac_say_helper(self, text: str, cfg: dict) -> bool:
         try:
+            import os
             if not self._tts_ensure_mac_say_helper(cfg):
                 return False
             proc = getattr(self, '_tts_say_proc', None)
-            if not proc or proc.stdin is None or proc.poll() is not None:
+            master_fd = getattr(self, '_tts_say_master_fd', None)
+            if not proc or master_fd is None or proc.poll() is not None:
                 return False
-            proc.stdin.write((text or "").replace("\r", " ").replace("\n", " ") + "\n")
-            proc.stdin.flush()
+            payload = ((text or "").replace("\r", " ").replace("\n", " ") + "\n").encode("utf-8", errors="ignore")
+            os.write(master_fd, payload)
             now = time.time()
             self._tts_last_active = now
             self._tts_busy_until = now + self._tts_estimate_duration(text, cfg)
