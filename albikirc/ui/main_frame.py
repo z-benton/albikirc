@@ -81,6 +81,7 @@ class MainFrame(wx.Frame):
     def _make_body(self):
         panel = wx.Panel(self)
         sizer = wx.BoxSizer(wx.VERTICAL)
+        restored_size = False
 
         self.notebook = wx.Notebook(panel)
         self.notebook.SetName("Conversation tabs")
@@ -96,6 +97,7 @@ class MainFrame(wx.Frame):
             size = win.get('size'); pos = win.get('position')
             if isinstance(size, list) and len(size) == 2:
                 self.SetSize((int(size[0]), int(size[1])))
+                restored_size = True
             if isinstance(pos, list) and len(pos) == 2:
                 self.SetPosition((int(pos[0]), int(pos[1])))
         except Exception:
@@ -112,7 +114,8 @@ class MainFrame(wx.Frame):
         sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 0)
         panel.SetSizer(sizer)
 
-        self.SetSize((920, 600))
+        if not restored_size:
+            self.SetSize((920, 600))
 
     def _add_chat_tab(self, title: str):
         chat = ChatPanel(self.notebook, on_send=self._on_send_message)
@@ -275,6 +278,7 @@ class MainFrame(wx.Frame):
         self._tts_voice_ids = {}
         cfg = self._get_tts_cfg()
         current_voice = str(cfg.get('voice', 'Default'))
+        current_lang = str(cfg.get('language', '') or '')
 
         # Always include Default
         id_default = wx.NewIdRef()
@@ -322,13 +326,13 @@ class MainFrame(wx.Frame):
                     item = sm.Append(vid, label, kind=wx.ITEM_RADIO)
                     try:
                         # Check if this entry matches current selection
-                        item.Check(current_voice == nm)
+                        item.Check(current_voice == nm and current_lang == ('' if lang == 'Other' else lang))
                     except Exception:
                         pass
                     self.Bind(wx.EVT_MENU, lambda evt, name=nm, l=(None if lang=='Other' else lang): self._on_tts_select_voice(name, l), id=vid)
-            # Label the language submenu (user-friendly)
-            sub_label = self._friendly_lang_label(lang) if lang != 'Other' else 'Other'
-            sub.AppendSubMenu(sm, sub_label)
+                # Label the language submenu (user-friendly)
+                sub_label = self._friendly_lang_label(lang) if lang != 'Other' else 'Other'
+                sub.AppendSubMenu(sm, sub_label)
             voices_menu.AppendSubMenu(sub, "&Eloquence")
 
         # The remaining voices
@@ -630,9 +634,18 @@ class MainFrame(wx.Frame):
         self.SetAcceleratorTable(wx.AcceleratorTable(entries))
 
     def _bind_events(self):
-        event_bus.subscribe("irc.status", lambda text: wx.CallAfter(self._on_irc_status, text))
-        event_bus.subscribe("irc.message", lambda target, sender, text: wx.CallAfter(self._on_irc_message, target, sender, text))
-        event_bus.subscribe("irc.users", lambda target, users: wx.CallAfter(self._on_irc_users, target, users))
+        self._event_handlers = [
+            ("irc.status", lambda text: wx.CallAfter(self._on_irc_status, text)),
+            ("irc.message", lambda target, sender, text: wx.CallAfter(self._on_irc_message, target, sender, text)),
+            ("irc.users", lambda target, users: wx.CallAfter(self._on_irc_users, target, users)),
+        ]
+        for event_type, callback in self._event_handlers:
+            event_bus.subscribe(event_type, callback)
+
+    def _unbind_events(self):
+        for event_type, callback in getattr(self, "_event_handlers", []):
+            event_bus.unsubscribe(event_type, callback)
+        self._event_handlers = []
 
     # Event handlers
     def _on_connect(self, evt):
@@ -991,9 +1004,11 @@ class MainFrame(wx.Frame):
 
     def _tts_start_playback(self, text: str, cfg: dict):
         started = False
+        if self._tts_prefer_process_backend(cfg):
+            started = self._tts_speak_fallback(text, cfg)
         try:
             tts = getattr(self, '_tts', None)
-            if tts and hasattr(tts, 'Speak') and text:
+            if not started and tts and hasattr(tts, 'Speak') and text:
                 tts.Speak(text)
                 started = True
         except Exception:
@@ -1092,22 +1107,33 @@ class MainFrame(wx.Frame):
         except Exception:
             return None
 
-    def _tts_speak_fallback(self, text: str, cfg: dict | None = None) -> bool:
+    def _tts_prefer_process_backend(self, cfg: dict | None = None) -> bool:
         try:
             import sys
             cfg = cfg or self._get_tts_cfg()
-            voice = str(cfg.get('voice', 'Default'))
+            voice = str(cfg.get('voice', 'Default') or 'Default').strip()
+            language = str(cfg.get('language', '') or '').strip()
+            # macOS voice names come from `say -v ?`, so use `say` for reliable matching.
+            if sys.platform == 'darwin':
+                return True
+            # On other platforms, a specific voice/language choice is more likely to
+            # work via the OS-native command path than via wx's generic wrapper.
+            return voice.lower() != 'default' or bool(language)
+        except Exception:
+            return False
+
+    def _tts_build_process_command(self, text: str, cfg: dict | None = None) -> list[str] | None:
+        try:
+            import sys
+            cfg = cfg or self._get_tts_cfg()
+            voice = str(cfg.get('voice', 'Default') or 'Default').strip()
             wpm = int(cfg.get('rate_wpm', 180))
-            # macOS: say
             if sys.platform == 'darwin':
                 cmd = ["say"]
                 if voice and voice.lower() != 'default':
                     cmd += ["-v", voice]
-                # macOS say expects approximate words per minute via -r
                 cmd += ["-r", str(max(80, min(600, wpm))), text]
-                if self._tts_start_process(cmd):
-                    return True
-            # Windows: SAPI via PowerShell
+                return cmd
             if sys.platform.startswith('win'):
                 rate = self._tts_map_rate(wpm)
                 ps = (
@@ -1119,14 +1145,20 @@ class MainFrame(wx.Frame):
                 if voice and voice.lower() != 'default':
                     ps += f"try{{$s.SelectVoice('{voice}')}}catch{{}};"
                 ps += "$s.Speak($t);"
-                if self._tts_start_process(["powershell", "-NoProfile", "-Command", ps]):
-                    return True
-            # Linux: espeak or spd-say
-            cmd = ["espeak", f"-s{max(80,min(600,wpm))}"]
+                return ["powershell", "-NoProfile", "-Command", ps]
+            cmd = ["espeak", f"-s{max(80, min(600, wpm))}"]
             if voice and voice.lower() != 'default':
                 cmd += ["-v", voice]
             cmd.append(text)
-            if self._tts_start_process(cmd):
+            return cmd
+        except Exception:
+            return None
+
+    def _tts_speak_fallback(self, text: str, cfg: dict | None = None) -> bool:
+        try:
+            cfg = cfg or self._get_tts_cfg()
+            cmd = self._tts_build_process_command(text, cfg)
+            if cmd and self._tts_start_process(cmd):
                 return True
             if self._tts_start_process(["spd-say", text]):
                 return True
@@ -1164,6 +1196,9 @@ class MainFrame(wx.Frame):
         # Slash commands
         if text.startswith('/'):
             self._handle_slash_command(target, chat, text)
+            return
+        if target.lower() == "console":
+            self._on_irc_status("Open or join a channel, or start a private message, before sending chat.")
             return
         chat.append_message(f"me: {text}")
         self.irc.send_message(target=target, text=text)
@@ -1342,10 +1377,7 @@ class MainFrame(wx.Frame):
 
     def _handle_slash_quit(self, target, chat, arg):
         reason = arg.strip() or "Bye"
-        try:
-            self.irc._send_raw(f"QUIT :{reason}")
-        except Exception:
-            pass
+        self.irc.quit(reason)
         self.Close()
 
     # IRC stub callbacks
@@ -1726,6 +1758,7 @@ class MainFrame(wx.Frame):
 
     def Destroy(self):
         try:
+            self._unbind_events()
             # Save window geometry and open tabs
             try:
                 size = self.GetSize(); pos = self.GetPosition()
@@ -1758,6 +1791,7 @@ class MainFrame(wx.Frame):
 
     def Close(self, force=False):
         try:
+            self._unbind_events()
             # Persist on close as well
             try:
                 size = self.GetSize(); pos = self.GetPosition()

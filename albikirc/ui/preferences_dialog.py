@@ -826,8 +826,17 @@ class PreferencesDialog(wx.Dialog):
 
     def _on_tts_test(self, evt):
         try:
-            TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
             sample = "This is a test of text to speech."
+            if self._tts_prefer_process_backend():
+                cmd = self._tts_build_process_command(sample)
+                if cmd:
+                    try:
+                        import subprocess
+                        subprocess.Popen(cmd)
+                        return
+                    except Exception:
+                        pass
+            TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
             if TTS is not None:
                 tts = TTS()
                 # Apply voice
@@ -871,44 +880,60 @@ class PreferencesDialog(wx.Dialog):
                     pass
             # Fallback if wx TTS unavailable or failed
             try:
-                import sys, subprocess
-                voice = (getattr(self, '_last_tts_voice', '') or 'Default').strip()
-                wpm = int(self.spin_tts_wpm.GetValue())
-                if sys.platform == 'darwin':
-                    cmd = ["say"]
-                    if voice and voice.lower() != 'default':
-                        cmd += ["-v", voice]
-                    cmd += ["-r", str(max(80, min(600, wpm))), sample]
+                import subprocess
+                cmd = self._tts_build_process_command(sample)
+                if cmd:
                     subprocess.Popen(cmd)
                     return
-                if sys.platform.startswith('win'):
-                    rate = self._tts_map_rate(wpm)
-                    ps = (
-                        "$t='" + sample.replace("'","''") + "';"
-                        "Add-Type -AssemblyName System.Speech;"
-                        "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                        f"$s.Rate={rate};"
-                    )
-                    if voice and voice.lower() != 'default':
-                        ps += f"try{{$s.SelectVoice('{voice}')}}catch{{}};"
-                    ps += "$s.Speak($t);"
-                    subprocess.Popen(["powershell", "-NoProfile", "-Command", ps])
-                    return
-                # Linux
-                try:
-                    subprocess.Popen(["espeak", f"-s{max(80,min(600,wpm))}", sample])
-                    return
-                except Exception:
-                    try:
-                        subprocess.Popen(["spd-say", sample])
-                        return
-                    except Exception:
-                        pass
+                subprocess.Popen(["spd-say", sample])
+                return
             except Exception:
                 pass
             wx.MessageBox("Text-to-speech engine not available.", "TTS", wx.OK | wx.ICON_WARNING)
         except Exception as e:
             wx.MessageBox(f"TTS error: {e}", "TTS", wx.OK | wx.ICON_ERROR)
+
+    def _tts_prefer_process_backend(self) -> bool:
+        try:
+            import sys
+            voice = (getattr(self, '_last_tts_voice', '') or 'Default').strip()
+            language = str((self._settings.get('tts', {}) or {}).get('language', '') or '').strip()
+            if sys.platform == 'darwin':
+                return True
+            return voice.lower() != 'default' or bool(language)
+        except Exception:
+            return False
+
+    def _tts_build_process_command(self, text: str) -> list[str] | None:
+        try:
+            import sys
+            voice = (getattr(self, '_last_tts_voice', '') or 'Default').strip()
+            wpm = int(self.spin_tts_wpm.GetValue())
+            if sys.platform == 'darwin':
+                cmd = ["say"]
+                if voice and voice.lower() != 'default':
+                    cmd += ["-v", voice]
+                cmd += ["-r", str(max(80, min(600, wpm))), text]
+                return cmd
+            if sys.platform.startswith('win'):
+                rate = self._tts_map_rate(wpm)
+                ps = (
+                    "$t='" + text.replace("'","''") + "';"
+                    "Add-Type -AssemblyName System.Speech;"
+                    "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+                    f"$s.Rate={rate};"
+                )
+                if voice and voice.lower() != 'default':
+                    ps += f"try{{$s.SelectVoice('{voice}')}}catch{{}};"
+                ps += "$s.Speak($t);"
+                return ["powershell", "-NoProfile", "-Command", ps]
+            cmd = ["espeak", f"-s{max(80, min(600, wpm))}"]
+            if voice and voice.lower() != 'default':
+                cmd += ["-v", voice]
+            cmd.append(text)
+            return cmd
+        except Exception:
+            return None
 
     @property
     def values(self):

@@ -11,10 +11,22 @@ class EventBus:
         if event_type not in self._subscribers:
             self._subscribers[event_type] = []
         self._subscribers[event_type].append(callback)
+        return callback
+
+    def unsubscribe(self, event_type: str, callback: Callable):
+        subscribers = self._subscribers.get(event_type)
+        if not subscribers:
+            return
+        try:
+            subscribers.remove(callback)
+        except ValueError:
+            return
+        if not subscribers:
+            self._subscribers.pop(event_type, None)
 
     def publish(self, event_type: str, *args: Any, **kwargs: Any):
         if event_type in self._subscribers:
-            for callback in self._subscribers[event_type]:
+            for callback in list(self._subscribers[event_type]):
                 try:
                     callback(*args, **kwargs)
                 except Exception as e:

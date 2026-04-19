@@ -31,6 +31,7 @@ class IRCClient:
     _reg_sent: bool = field(default=False, init=False)
     _cap_in_progress: bool = field(default=False, init=False)
     _awaiting_auth_plus: bool = field(default=False, init=False)
+    _quit_sent: bool = field(default=False, init=False)
 
     # CTCP preferences
     respond_to_ctcp_version: bool = field(default=True)
@@ -252,7 +253,7 @@ class IRCClient:
             self._send_raw("AUTHENTICATE PLAIN")
             self._awaiting_auth_plus = True
             return
-        if subcmd in ("NAK", "LS"):
+        if subcmd == "NAK":
             if not self._awaiting_auth_plus and self._cap_in_progress:
                 self._send_raw("CAP END")
                 self._cap_in_progress = False
@@ -473,6 +474,8 @@ class IRCClient:
         sender, _ = self._parse_prefix(prefix or "")
         new_nick = trailing or (params[0] if params else "")
         if new_nick:
+            if self.nick and sender.lower() == self.nick.lower():
+                self.nick = new_nick
             if self.show_quit_nick_notices:
                 self._emit_status(f"{sender} is now known as {new_nick}")
             # Rename in all tracked channels
@@ -502,6 +505,7 @@ class IRCClient:
         self._reg_sent = False
         self._cap_in_progress = False
         self._awaiting_auth_plus = False
+        self._quit_sent = False
         self._stop_event.clear()
         try:
             raw_sock = socket.create_connection((host, port), timeout=15)
@@ -616,11 +620,23 @@ class IRCClient:
     def send_raw(self, line: str):
         self._send_raw(line)
 
+    def quit(self, reason: str = "Bye"):
+        if not self.connected:
+            self._emit_status("Not connected.")
+            return
+        try:
+            self._send_raw(f"QUIT :{reason}")
+            self._quit_sent = True
+        except Exception as e:
+            self._emit_status(f"Send error: {e}")
+
     def disconnect(self):
         try:
             if self._sock:
                 try:
-                    self._send_raw("QUIT :Bye")
+                    if not self._quit_sent:
+                        self._send_raw("QUIT :Bye")
+                        self._quit_sent = True
                 except Exception:
                     pass
                 try:
@@ -652,3 +668,4 @@ class IRCClient:
                 self._activity_timers.clear()
                 self._activity.clear()
             # Do not clear nick; keep for PM routing until next connect
+            self._quit_sent = False

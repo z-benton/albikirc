@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import json, os, sys
 from pathlib import Path
 from typing import Any, Dict
@@ -73,12 +74,12 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 def merge(a: Dict[str, Any], b: Dict[str, Any]) -> Dict[str, Any]:
-    out = a.copy()
+    out = copy.deepcopy(a)
     for k, v in b.items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = merge(out[k], v)  # type: ignore
         else:
-            out[k] = v
+            out[k] = copy.deepcopy(v)
     return out
 
 def load() -> Dict[str, Any]:
@@ -88,7 +89,7 @@ def load() -> Dict[str, Any]:
             return merge(DEFAULTS, data)
     except Exception:
         pass
-    return DEFAULTS.copy()
+    return copy.deepcopy(DEFAULTS)
 
 def save(cfg: Dict[str, Any]) -> None:
     try:
