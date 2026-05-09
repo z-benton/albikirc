@@ -30,6 +30,16 @@ class PreferencesDialog(wx.Dialog):
         self.chk_timestamps.SetName("Show timestamps checkbox")
         self.chk_timestamps.SetToolTip("Prepend [HH:MM] to each line in transcript")
 
+        interface = self._settings.get('interface', {})
+        self.chk_close_channel_list = wx.CheckBox(p_app, label="Close channel list after joining")
+        self.chk_close_channel_list.SetValue(
+            bool(interface.get('close_channel_list_on_join', True))
+        )
+        self.chk_close_channel_list.SetName("Close channel list after joining checkbox")
+        self.chk_close_channel_list.SetToolTip(
+            "When enabled, the channel list window closes after you join a selected channel"
+        )
+
         self.choice_theme = wx.Choice(p_app, choices=["System", "Light", "Dark"]) 
         theme_val = (app.get('theme') or 'system').lower()
         idx = {"system": 0, "light": 1, "dark": 2}.get(theme_val, 0)
@@ -203,6 +213,7 @@ class PreferencesDialog(wx.Dialog):
         rowt.Add(self.choice_theme, 0)
         s_app.Add(rowt, 0, wx.EXPAND | wx.ALL, 6)
         s_app.Add(self.chk_timestamps, 0, wx.ALL, 6)
+        s_app.Add(self.chk_close_channel_list, 0, wx.ALL, 6)
         p_app.SetSizer(s_app)
 
         # Identity
@@ -350,7 +361,9 @@ class PreferencesDialog(wx.Dialog):
         help_tts = wx.StaticText(p_tts, label="Speak incoming events using the selected system voice.")
         try:
             help_tts.SetForegroundColour(wx.Colour(90, 90, 90))
-            f = help_tts.GetFont(); f.MakeSmaller(); help_tts.SetFont(f)
+            f = help_tts.GetFont()
+            f.MakeSmaller()
+            help_tts.SetFont(f)
         except Exception:
             pass
         s_tts.Add(help_tts, 0, wx.ALL, 6)
@@ -401,10 +414,12 @@ class PreferencesDialog(wx.Dialog):
             if sys.platform == 'darwin' and MacSpeechBackend.is_available():
                 names = [str(v.get('name') or 'Voice') for v in MacSpeechBackend().available_voices()]
                 if names:
-                    seen = set(); out = []
+                    seen = set()
+                    out = []
                     for n in names:
                         if n not in seen:
-                            seen.add(n); out.append(n)
+                            seen.add(n)
+                            out.append(n)
                     return out
             # 1) Prefer wx.TextToSpeech enumeration
             TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
@@ -429,15 +444,17 @@ class PreferencesDialog(wx.Dialog):
                             pass
                         if names:
                             # Deduplicate while preserving order
-                            seen = set(); out = []
+                            seen = set()
+                            out = []
                             for n in names:
                                 if n not in seen:
-                                    seen.add(n); out.append(n)
+                                    seen.add(n)
+                                    out.append(n)
                             return out
                 except Exception:
                     pass
             # 2) OS-level enumeration fallbacks
-            import sys, subprocess
+            import subprocess
             # macOS: say -v ? (with optional language filter)
             if sys.platform == 'darwin':
                 try:
@@ -508,10 +525,12 @@ class PreferencesDialog(wx.Dialog):
                 if names:
                     # Remove header lines and dups
                     names = [n for n in names if n.lower() != 'voice']
-                    seen = set(); out = []
+                    seen = set()
+                    out = []
                     for n in names:
                         if n not in seen:
-                            seen.add(n); out.append(n)
+                            seen.add(n)
+                            out.append(n)
                     return out
             except Exception:
                 pass
@@ -543,27 +562,45 @@ class PreferencesDialog(wx.Dialog):
                 sub = wx.Menu()
                 groups = {}
                 for v in elo:
-                    l = (v.get('lang') or '').strip() or 'Other'
-                    groups.setdefault(l, []).append(v)
+                    lang = (v.get('lang') or '').strip() or 'Other'
+                    groups.setdefault(lang, []).append(v)
+
                 def sort_key(k: str):
                     k_l = k.lower()
-                    if k_l == 'en_us': return (0, k)
-                    if k_l == 'en_gb': return (1, k)
+                    if k_l == 'en_us':
+                        return (0, k)
+                    if k_l == 'en_gb':
+                        return (1, k)
                     return (2, k)
-                for l in sorted(groups.keys(), key=sort_key):
+
+                for lang in sorted(groups.keys(), key=sort_key):
                     sm = wx.Menu()
-                    for v in groups[l]:
+                    for v in groups[lang]:
                         name = v.get('name') or ''
                         if not name:
                             continue
                         vid = wx.NewIdRef()
                         item = sm.Append(vid, name, kind=wx.ITEM_RADIO)
                         try:
-                            item.Check(self._last_tts_voice == name and str((self._settings.get('tts', {}) or {}).get('language','') or '') == ('' if l=='Other' else l))
+                            current_lang = str(
+                                (self._settings.get('tts', {}) or {}).get('language', '') or ''
+                            )
+                            selected_lang = '' if lang == 'Other' else lang
+                            item.Check(
+                                self._last_tts_voice == name and current_lang == selected_lang
+                            )
                         except Exception:
                             pass
-                        self.Bind(wx.EVT_MENU, lambda e, nm=name, lang=(None if l=='Other' else l): self._set_tts_voice(nm, lang), id=vid)
-                    sub.AppendSubMenu(sm, self._friendly_lang_label(l) if l!='Other' else 'Other')
+                        voice_lang = None if lang == 'Other' else lang
+                        self.Bind(
+                            wx.EVT_MENU,
+                            lambda e, nm=name, selected_lang=voice_lang: (
+                                self._set_tts_voice(nm, selected_lang)
+                            ),
+                            id=vid,
+                        )
+                    sub_label = self._friendly_lang_label(lang) if lang != 'Other' else 'Other'
+                    sub.AppendSubMenu(sm, sub_label)
                 menu.AppendSubMenu(sub, "Eloquence")
 
             for v in oth:
@@ -605,7 +642,8 @@ class PreferencesDialog(wx.Dialog):
     def _tts_list_voices_detailed(self) -> list[dict]:
         out = []
         try:
-            import sys, subprocess
+            import sys
+            import subprocess
             if sys.platform == 'darwin' and MacSpeechBackend.is_available():
                 for voice in MacSpeechBackend().available_voices():
                     nm = str(voice.get('name') or 'Voice')
@@ -655,12 +693,14 @@ class PreferencesDialog(wx.Dialog):
         except Exception:
             pass
         # Dedup by (name, lang)
-        seen = set(); dedup = []
+        seen = set()
+        dedup = []
         for v in out:
             key = (v.get('name'), v.get('lang') or '')
             if key in seen:
                 continue
-            seen.add(key); dedup.append(v)
+            seen.add(key)
+            dedup.append(v)
         return dedup
 
     def _friendly_lang_label(self, code: str) -> str:
@@ -778,7 +818,7 @@ class PreferencesDialog(wx.Dialog):
                     return (True, "wx.Sound", None)
             except Exception as e:
                 _ = str(e)
-            import sys, subprocess
+            import subprocess
             if sys.platform.startswith('win'):
                 try:
                     import winsound
@@ -1005,6 +1045,9 @@ class PreferencesDialog(wx.Dialog):
             'appearance': {
                 'timestamps': self.chk_timestamps.GetValue(),
                 'theme': ["system", "light", "dark"][max(0, self.choice_theme.GetSelection())],
+            },
+            'interface': {
+                'close_channel_list_on_join': self.chk_close_channel_list.GetValue(),
             },
             'ctcp': {
                 'respond_to_ctcp_version': self.chk_ctcp_version.GetValue(),

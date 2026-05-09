@@ -1,4 +1,5 @@
 import time
+import sys
 from collections import deque
 
 import wx
@@ -12,6 +13,7 @@ from .connect_dialog import ConnectDialog
 from .preferences_dialog import PreferencesDialog
 from .saved_servers_dialog import SavedServersDialog
 from .help_dialog import HelpDialog
+from .channel_list_dialog import ChannelListDialog
 from ..event_bus import event_bus
 
 
@@ -23,6 +25,8 @@ class MainFrame(wx.Frame):
 
         self.settings = settings or {}
         self.irc = IRCClient()
+        self._channel_list_dialog = None
+        self._channel_list_user_closed = False
         # Apply CTCP prefs to irc client
         ctcp = self.settings.get('ctcp', {})
         self.irc.respond_to_ctcp_version = ctcp.get('respond_to_ctcp_version', True)
@@ -76,6 +80,7 @@ class MainFrame(wx.Frame):
             pass
 
         self._make_accelerators()
+        self.Bind(wx.EVT_CHAR_HOOK, self._on_frame_char_hook)
         # Initialize Text-to-Speech (if configured and available)
         self._tts_init()
 
@@ -96,7 +101,8 @@ class MainFrame(wx.Frame):
         # Restore tabs and window geometry
         try:
             win = self.settings.get('window', {})
-            size = win.get('size'); pos = win.get('position')
+            size = win.get('size')
+            pos = win.get('position')
             if isinstance(size, list) and len(size) == 2:
                 self.SetSize((int(size[0]), int(size[1])))
                 restored_size = True
@@ -164,6 +170,7 @@ class MainFrame(wx.Frame):
         self.ID_EXPORT_SERVERS = wx.NewIdRef()
         self.ID_IMPORT_SERVERS = wx.NewIdRef()
         self.ID_JOIN = wx.NewIdRef()
+        self.ID_CHANNEL_LIST = wx.NewIdRef()
         self.ID_CLOSE_TAB = wx.NewIdRef()
         self.ID_PREFERENCES = wx.NewIdRef()
         self.ID_FOCUS_INPUT = wx.NewIdRef()
@@ -181,6 +188,12 @@ class MainFrame(wx.Frame):
         file_menu.Append(self.ID_IMPORT_SERVERS, "&Import Servers…", "Import servers from a JSON file")
         file_menu.AppendSeparator()
         file_menu.Append(self.ID_JOIN, "&Join Channel…\tCtrl-J", "Join a channel")
+        channel_list_shortcut = "Cmd-L" if sys.platform == "darwin" else "Ctrl-L"
+        file_menu.Append(
+            self.ID_CHANNEL_LIST,
+            f"Channel &List…\t{channel_list_shortcut}",
+            "Browse channels on the server",
+        )
         file_menu.Append(self.ID_CLOSE_TAB, "Close &Tab\tCtrl-W", "Close current tab")
         file_menu.AppendSeparator()
         file_menu.Append(wx.ID_EXIT, "E&xit\tCtrl-Q", "Quit albikirc")
@@ -218,6 +231,7 @@ class MainFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self._on_export_servers, id=self.ID_EXPORT_SERVERS)
         self.Bind(wx.EVT_MENU, self._on_import_servers, id=self.ID_IMPORT_SERVERS)
         self.Bind(wx.EVT_MENU, self._on_join_channel, id=self.ID_JOIN)
+        self.Bind(wx.EVT_MENU, self._on_channel_list, id=self.ID_CHANNEL_LIST)
         self.Bind(wx.EVT_MENU, self._on_close_tab, id=self.ID_CLOSE_TAB)
         self.Bind(wx.EVT_MENU, self._on_preferences, id=self.ID_PREFERENCES)
         self.Bind(wx.EVT_MENU, self._on_focus_input, id=self.ID_FOCUS_INPUT)
@@ -268,7 +282,6 @@ class MainFrame(wx.Frame):
 
     def _populate_voice_submenu(self, voices_menu: wx.Menu):
         try:
-            import sys
             # Clear previous
             while True:
                 item = voices_menu.FindItemByPosition(0)
@@ -311,8 +324,10 @@ class MainFrame(wx.Frame):
             # Order with en_US, en_GB first when present
             def sort_key(k: str):
                 k_l = k.lower()
-                if k_l == 'en_us': return (0, k)
-                if k_l == 'en_gb': return (1, k)
+                if k_l == 'en_us':
+                    return (0, k)
+                if k_l == 'en_gb':
+                    return (1, k)
                 return (2, k)
             for lang in sorted(groups.keys(), key=sort_key):
                 vs = groups[lang]
@@ -331,7 +346,14 @@ class MainFrame(wx.Frame):
                         item.Check(current_voice == nm and current_lang == ('' if lang == 'Other' else lang))
                     except Exception:
                         pass
-                    self.Bind(wx.EVT_MENU, lambda evt, name=nm, l=(None if lang=='Other' else lang): self._on_tts_select_voice(name, l), id=vid)
+                    selected_lang = None if lang == 'Other' else lang
+                    self.Bind(
+                        wx.EVT_MENU,
+                        lambda evt, name=nm, voice_lang=selected_lang: (
+                            self._on_tts_select_voice(name, voice_lang)
+                        ),
+                        id=vid,
+                    )
                 # Label the language submenu (user-friendly)
                 sub_label = self._friendly_lang_label(lang) if lang != 'Other' else 'Other'
                 sub.AppendSubMenu(sm, sub_label)
@@ -424,7 +446,8 @@ class MainFrame(wx.Frame):
                 idx = -1
                 for i in range(bar.GetMenuCount()):
                     if bar.GetMenuLabelText(i).lower() == 'speech':
-                        idx = i; break
+                        idx = i
+                        break
                 if idx >= 0:
                     try:
                         bar.Remove(idx)
@@ -451,7 +474,8 @@ class MainFrame(wx.Frame):
             idx = -1
             for i in range(bar.GetMenuCount()):
                 if bar.GetMenuLabelText(i).lower() == 'speech':
-                    idx = i; break
+                    idx = i
+                    break
             if idx >= 0:
                 try:
                     bar.Remove(idx)
@@ -479,12 +503,14 @@ class MainFrame(wx.Frame):
                     desc = str(voice.get('desc') or '')
                     out.append({'name': nm, 'lang': lang, 'desc': desc, 'eloquence': self._is_eloquence_name(nm)})
                 if out:
-                    seen = set(); dedup = []
+                    seen = set()
+                    dedup = []
                     for v in out:
                         key = (v.get('name'), v.get('lang') or '')
                         if key in seen:
                             continue
-                        seen.add(key); dedup.append(v)
+                        seen.add(key)
+                        dedup.append(v)
                     return dedup
         except Exception:
             pass
@@ -512,7 +538,8 @@ class MainFrame(wx.Frame):
             pass
         # macOS: prefer richer details from say -v ?
         try:
-            import sys, subprocess
+            import sys
+            import subprocess
             if sys.platform == 'darwin':
                 p = subprocess.Popen(["say", "-v", "?"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 txt, _ = p.communicate(timeout=3)
@@ -552,12 +579,14 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
         # Deduplicate by (name, lang) preserving order
-        seen = set(); dedup = []
+        seen = set()
+        dedup = []
         for v in out:
             key = (v.get('name'), v.get('lang') or '')
             if key in seen:
                 continue
-            seen.add(key); dedup.append(v)
+            seen.add(key)
+            dedup.append(v)
         return dedup
 
     def _is_eloquence_name(self, name: str) -> bool:
@@ -646,6 +675,7 @@ class MainFrame(wx.Frame):
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("N"), self.ID_CONNECT),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("N"), self.ID_CONNECT_SAVED),
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("J"), self.ID_JOIN),
+            wx.AcceleratorEntry(wx.ACCEL_CMD, ord("L"), self.ID_CHANNEL_LIST),
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord("W"), self.ID_CLOSE_TAB),
             wx.AcceleratorEntry(wx.ACCEL_CMD, ord(","), self.ID_PREFERENCES),
             wx.AcceleratorEntry(wx.ACCEL_CMD | wx.ACCEL_SHIFT, ord("M"), self.ID_FOCUS_INPUT),
@@ -654,11 +684,33 @@ class MainFrame(wx.Frame):
         ]
         self.SetAcceleratorTable(wx.AcceleratorTable(entries))
 
+    def _on_frame_char_hook(self, evt):
+        try:
+            key = evt.GetKeyCode()
+            cmd_or_ctrl = evt.CmdDown() or evt.ControlDown()
+            if cmd_or_ctrl and not evt.AltDown() and key == ord("L"):
+                self._request_channel_list()
+                return
+            evt.Skip()
+        except Exception:
+            try:
+                evt.Skip()
+            except Exception:
+                pass
+
     def _bind_events(self):
         self._event_handlers = [
             ("irc.status", lambda text: wx.CallAfter(self._on_irc_status, text)),
             ("irc.message", lambda target, sender, text: wx.CallAfter(self._on_irc_message, target, sender, text)),
             ("irc.users", lambda target, users: wx.CallAfter(self._on_irc_users, target, users)),
+            ("irc.channel_list_start", lambda: wx.CallAfter(self._on_channel_list_start)),
+            (
+                "irc.channel_list_item",
+                lambda channel, users, topic: wx.CallAfter(
+                    self._on_channel_list_item, channel, users, topic
+                ),
+            ),
+            ("irc.channel_list_end", lambda: wx.CallAfter(self._on_channel_list_end)),
         ]
         for event_type, callback in self._event_handlers:
             event_bus.subscribe(event_type, callback)
@@ -735,6 +787,46 @@ class MainFrame(wx.Frame):
                 self._chat_for_target(channel, create=True)
         dlg.Destroy()
 
+    def _on_channel_list(self, evt):
+        self._request_channel_list()
+
+    def _show_channel_list_dialog(self):
+        if self._channel_list_dialog is None:
+            dlg = ChannelListDialog(
+                self,
+                on_join=self._join_from_channel_list,
+                close_on_join=self._close_channel_list_on_join(),
+            )
+            dlg.set_refresh_handler(lambda evt: self._request_channel_list())
+            dlg.Bind(wx.EVT_CLOSE, self._on_channel_list_close)
+            self._channel_list_dialog = dlg
+        self._channel_list_dialog.close_on_join = self._close_channel_list_on_join()
+        self._channel_list_user_closed = False
+        self._channel_list_dialog.Show()
+        self._channel_list_dialog.Raise()
+        return self._channel_list_dialog
+
+    def _on_channel_list_close(self, evt):
+        if self._channel_list_dialog is not None:
+            self._channel_list_dialog.Destroy()
+            self._channel_list_dialog = None
+        self._channel_list_user_closed = True
+
+    def _request_channel_list(self, mask: str | None = None):
+        dlg = self._show_channel_list_dialog()
+        dlg.begin_list()
+        if not self.irc.connected:
+            dlg.end_list()
+        self.irc.list_channels(mask)
+
+    def _join_from_channel_list(self, channel: str):
+        self.irc.join_channel(channel)
+        self._chat_for_target(channel, create=True)
+
+    def _close_channel_list_on_join(self) -> bool:
+        interface = self.settings.get('interface', {})
+        return bool(interface.get('close_channel_list_on_join', True))
+
 
     def _on_export_servers(self, evt):
         servers = self.settings.get('servers', [])
@@ -770,7 +862,10 @@ class MainFrame(wx.Frame):
                     for s in incoming:
                         if not isinstance(s, dict):
                             continue
-                        host = s.get('host'); port = s.get('port'); name = s.get('name') or (host or ''); tls = bool(s.get('use_tls', True))
+                        host = s.get('host')
+                        port = s.get('port')
+                        name = s.get('name') or (host or '')
+                        tls = bool(s.get('use_tls', True))
                         if not host or not port:
                             continue
                         dup = any((x.get('host')==host and int(x.get('port',0))==int(port) and bool(x.get('use_tls',True))==tls and (x.get('name') or x.get('host',''))==name) for x in servers)
@@ -831,6 +926,7 @@ class MainFrame(wx.Frame):
             self.settings['nick'] = vals.get('nick', self.settings.get('nick',''))
             self.settings['realname'] = vals.get('realname', self.settings.get('realname',''))
             self.settings['appearance'] = vals.get('appearance', self.settings.get('appearance', {}))
+            self.settings['interface'] = vals.get('interface', self.settings.get('interface', {}))
             self.settings['ctcp'] = vals.get('ctcp', self.settings.get('ctcp', {}))
             self.settings['notifications'] = vals.get('notifications', self.settings.get('notifications', {}))
             self.settings['connection'] = vals.get('connection', self.settings.get('connection', {}))
@@ -869,6 +965,8 @@ class MainFrame(wx.Frame):
                         page.apply_theme(self._theme)
             except Exception:
                 pass
+            if self._channel_list_dialog is not None:
+                self._channel_list_dialog.close_on_join = self._close_channel_list_on_join()
             save(self.settings)
             self._on_irc_status(
                 f"Updated preferences: nick='{self.settings['nick']}', timestamps={'on' if self._timestamps else 'off'}, theme={self._theme}, CTCP VERSION auto-reply={self.irc.respond_to_ctcp_version}, ignore CTCP={self.irc.ignore_ctcp}, show join/part notices={self.irc.show_join_part_notices}, show quit/nick notices={self.irc.show_quit_nick_notices}, compact summaries={self.irc.activity_summaries} ({self.irc.activity_window_seconds}s), notices inline={'on' if self.irc.route_notices_inline else 'off'}, TCP keepalive={'on' if self.irc.enable_tcp_keepalive else 'off'}"
@@ -905,8 +1003,10 @@ class MainFrame(wx.Frame):
         baseline = 180.0
         rel = (wpm - baseline) / (600.0 - 60.0)
         rate = int(round(rel * 20))  # -10..10
-        if rate < -10: rate = -10
-        if rate > 10: rate = 10
+        if rate < -10:
+            rate = -10
+        if rate > 10:
+            rate = 10
         return rate
 
     def _tts_init(self):
@@ -1308,7 +1408,8 @@ class MainFrame(wx.Frame):
         if target.lower() == "console":
             self._on_irc_status("Open or join a channel, or start a private message, before sending chat.")
             return
-        chat.append_message(f"me: {text}")
+        for chunk in self.irc.split_message_text(target, text):
+            chat.append_message(f"me: {chunk}")
         self.irc.send_message(target=target, text=text)
         # Optional sound when sending a message
         try:
@@ -1348,6 +1449,9 @@ class MainFrame(wx.Frame):
         if chan:
             self.irc.join_channel(chan)
             self._chat_for_target(chan, create=True)
+
+    def _handle_slash_list(self, target, chat, arg):
+        self._request_channel_list(arg.strip() or None)
 
     def _handle_slash_p(self, target, chat, arg):
         self._handle_slash_part(target, chat, arg)
@@ -1397,7 +1501,8 @@ class MainFrame(wx.Frame):
             return
         # Route echo to the target tab for consistency
         dest = self._chat_for_target(tgt, create=True)
-        dest.append_message(f"me: [notice] {msg}")
+        for chunk in self.irc.split_message_text(tgt, msg, "NOTICE"):
+            dest.append_message(f"me: [notice] {chunk}")
         self.irc.send_notice(tgt, msg)
         # Consistent send feedback (sound/beep)
         try:
@@ -1466,7 +1571,8 @@ class MainFrame(wx.Frame):
         msg = a[1] if len(a) > 1 else ""
         pm = self._chat_for_target(nick, create=True)
         if msg:
-            pm.append_message(f"me: {msg}")
+            for chunk in self.irc.split_message_text(nick, msg):
+                pm.append_message(f"me: {chunk}")
             self.irc.send_message(nick, msg)
             # Consistent send feedback (sound/beep)
             try:
@@ -1772,6 +1878,20 @@ class MainFrame(wx.Frame):
         chat = self._chat_for_target(target, create=True)
         chat.set_users(users)
 
+    def _on_channel_list_start(self):
+        if self._channel_list_user_closed:
+            return
+        dlg = self._show_channel_list_dialog()
+        dlg.begin_list()
+
+    def _on_channel_list_item(self, channel: str, users: int | None, topic: str):
+        if self._channel_list_dialog is not None:
+            self._channel_list_dialog.add_channel(channel, users, topic)
+
+    def _on_channel_list_end(self):
+        if self._channel_list_dialog is not None:
+            self._channel_list_dialog.end_list()
+
     # Read last activity summary action
     def _on_read_last_activity(self, evt):
         idx = self.notebook.GetSelection()
@@ -1839,7 +1959,10 @@ class MainFrame(wx.Frame):
             self._beep_files = {}
 
     def _generate_beep_file(self, notes: list[tuple[int, int]]):
-        import math, wave, struct, tempfile
+        import math
+        import wave
+        import struct
+        import tempfile
         framerate = 44100
         amplitude = 16000  # 16-bit mono
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
@@ -1869,7 +1992,8 @@ class MainFrame(wx.Frame):
             self._unbind_events()
             # Save window geometry and open tabs
             try:
-                size = self.GetSize(); pos = self.GetPosition()
+                size = self.GetSize()
+                pos = self.GetPosition()
                 self.settings.setdefault('window', {})['size'] = [size.width, size.height]
                 self.settings.setdefault('window', {})['position'] = [pos.x, pos.y]
                 self.settings['open_tabs'] = []
@@ -1903,7 +2027,8 @@ class MainFrame(wx.Frame):
             self._unbind_events()
             # Persist on close as well
             try:
-                size = self.GetSize(); pos = self.GetPosition()
+                size = self.GetSize()
+                pos = self.GetPosition()
                 self.settings.setdefault('window', {})['size'] = [size.width, size.height]
                 self.settings.setdefault('window', {})['position'] = [pos.x, pos.y]
                 self.settings['open_tabs'] = []

@@ -1,6 +1,8 @@
 from __future__ import annotations
 import copy
-import json, os, sys
+import json
+import os
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -45,6 +47,9 @@ DEFAULTS: Dict[str, Any] = {
     "appearance": {
         "theme": "system",  # one of: system, light, dark
         "timestamps": True,
+    },
+    "interface": {
+        "close_channel_list_on_join": True,
     },
     "beeps": {
         "enabled": False,

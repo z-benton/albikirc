@@ -4,7 +4,7 @@ import socket
 import ssl
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 import base64
 import time
 
@@ -64,6 +64,7 @@ class IRCClient:
     _activity: dict[str, dict[str, set[str]]] = field(default_factory=dict, init=False)  # keys: 'join','part','kick'
     _activity_timers: dict[str, threading.Timer] = field(default_factory=dict, init=False)
     _activity_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _max_irc_line_bytes: int = field(default=510, init=False)
 
     def _queue_activity(self, channel: str, *, joined: list[str] | None = None, parted: list[str] | None = None, kicked: list[str] | None = None):
         key = channel.lower()
@@ -122,6 +123,15 @@ class IRCClient:
 
     def _emit_users(self, target: str, users: list[str]):
         event_bus.publish("irc.users", target=target, users=users)
+
+    def _emit_channel_list_start(self):
+        event_bus.publish("irc.channel_list_start")
+
+    def _emit_channel_list_item(self, channel: str, users: int | None, topic: str):
+        event_bus.publish("irc.channel_list_item", channel=channel, users=users, topic=topic)
+
+    def _emit_channel_list_end(self):
+        event_bus.publish("irc.channel_list_end")
 
     # Networking helpers
     def _send_raw(self, line: str):
@@ -279,7 +289,7 @@ class IRCClient:
         self._send_registration()
 
     def _handle_904(self, prefix, params, trailing):
-        self._emit_status(f"SASL authentication failed (904). Continuing without SASL.")
+        self._emit_status("SASL authentication failed (904). Continuing without SASL.")
         if self._cap_in_progress:
             self._send_raw("CAP END")
             self._cap_in_progress = False
@@ -287,7 +297,7 @@ class IRCClient:
         self._send_registration()
 
     def _handle_905(self, prefix, params, trailing):
-        self._emit_status(f"SASL authentication failed (905). Continuing without SASL.")
+        self._emit_status("SASL authentication failed (905). Continuing without SASL.")
         if self._cap_in_progress:
             self._send_raw("CAP END")
             self._cap_in_progress = False
@@ -295,7 +305,7 @@ class IRCClient:
         self._send_registration()
 
     def _handle_906(self, prefix, params, trailing):
-        self._emit_status(f"SASL authentication failed (906). Continuing without SASL.")
+        self._emit_status("SASL authentication failed (906). Continuing without SASL.")
         if self._cap_in_progress:
             self._send_raw("CAP END")
             self._cap_in_progress = False
@@ -359,14 +369,18 @@ class IRCClient:
     def _handle_311(self, prefix, params, trailing):  # RPL_WHOISUSER
         if len(params) < 5 or trailing is None:
             return
-        nick = params[1]; user = params[2]; host = params[3]
+        nick = params[1]
+        user = params[2]
+        host = params[3]
         real = trailing
         self._emit_status(f"WHOIS {nick}: {user}@{host} — {real}")
 
     def _handle_312(self, prefix, params, trailing):  # RPL_WHOISSERVER
         if len(params) < 3 or trailing is None:
             return
-        nick = params[1]; server = params[2]; info = trailing
+        nick = params[1]
+        server = params[2]
+        info = trailing
         self._emit_status(f"WHOIS {nick}: on {server} — {info}")
 
     def _handle_317(self, prefix, params, trailing):  # RPL_WHOISIDLE
@@ -497,6 +511,22 @@ class IRCClient:
 
     # RPL_ENDOFNAMES (366) could be handled to signal completion
 
+    def _handle_321(self, prefix, params, trailing):  # RPL_LISTSTART
+        self._emit_channel_list_start()
+
+    def _handle_322(self, prefix, params, trailing):  # RPL_LIST
+        if len(params) < 3:
+            return
+        channel = params[1]
+        try:
+            users = int(params[2])
+        except Exception:
+            users = None
+        self._emit_channel_list_item(channel, users, trailing or "")
+
+    def _handle_323(self, prefix, params, trailing):  # RPL_LISTEND
+        self._emit_channel_list_end()
+
     # Public API
     def connect(self, host: str, port: int, nick: str, *, real_name: str | None = None, use_tls: bool = True):
         self.disconnect()
@@ -581,11 +611,49 @@ class IRCClient:
         else:
             self._send_raw(f"JOIN {channel}")
 
+    def split_message_text(self, target: str, text: str, command: str = "PRIVMSG") -> list[str]:
+        text = str(text or "")
+        if not text:
+            return []
+
+        prefix = f"{command} {target} :"
+        max_text_bytes = self._max_irc_line_bytes - len(prefix.encode("utf-8", errors="ignore"))
+        max_text_bytes = max(1, max_text_bytes)
+
+        chunks: list[str] = []
+        remaining = text
+        while remaining:
+            if len(remaining.encode("utf-8", errors="ignore")) <= max_text_bytes:
+                chunks.append(remaining)
+                break
+
+            split_at = self._find_split_index(remaining, max_text_bytes)
+            chunk = remaining[:split_at].rstrip()
+            if not chunk:
+                chunk = remaining[:split_at]
+            chunks.append(chunk)
+            remaining = remaining[split_at:].lstrip()
+
+        return chunks
+
+    def _find_split_index(self, text: str, max_bytes: int) -> int:
+        used = 0
+        last_space = -1
+        for idx, char in enumerate(text):
+            char_len = len(char.encode("utf-8", errors="ignore"))
+            if used + char_len > max_bytes:
+                return last_space + 1 if last_space > 0 else max(1, idx)
+            used += char_len
+            if char.isspace():
+                last_space = idx
+        return len(text)
+
     def send_message(self, target: str, text: str):
         if not self.connected:
             self._emit_status("Not connected.")
             return
-        self._send_raw(f"PRIVMSG {target} :{text}")
+        for chunk in self.split_message_text(target, text, "PRIVMSG"):
+            self._send_raw(f"PRIVMSG {target} :{chunk}")
 
     def send_action(self, target: str, action: str):
         if not self.connected:
@@ -598,7 +666,8 @@ class IRCClient:
         if not self.connected:
             self._emit_status("Not connected.")
             return
-        self._send_raw(f"NOTICE {target} :{text}")
+        for chunk in self.split_message_text(target, text, "NOTICE"):
+            self._send_raw(f"NOTICE {target} :{chunk}")
 
     def set_topic(self, channel: str, topic: str | None = None):
         if not self.connected:
@@ -616,6 +685,16 @@ class IRCClient:
             self._emit_status("Not connected.")
             return
         self._send_raw(f"WHOIS {nick}")
+
+    def list_channels(self, mask: str | None = None):
+        if not self.connected:
+            self._emit_status("Not connected.")
+            return
+        mask = (mask or "").strip()
+        if mask:
+            self._send_raw(f"LIST {mask}")
+        else:
+            self._send_raw("LIST")
 
     def send_raw(self, line: str):
         self._send_raw(line)

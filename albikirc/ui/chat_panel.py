@@ -1,5 +1,10 @@
+import textwrap
+
 import wx
 from datetime import datetime
+
+
+MAX_TRANSCRIPT_LINE_CHARS = 180
 
 
 class ChatPanel(wx.Panel):
@@ -61,12 +66,29 @@ class ChatPanel(wx.Panel):
 
     # Public helpers
     def append_message(self, text: str):
+        lines = self._split_readable_lines(text)
         if self.show_timestamps:
             ts = datetime.now().strftime("%H:%M")
-            line = f"[{ts}] {text}"
+            prefix = f"[{ts}] "
         else:
-            line = text
-        self.transcript.AppendText(line + "\n")
+            prefix = ""
+        for index, line in enumerate(lines):
+            continuation = "  " if index else ""
+            self.transcript.AppendText(f"{prefix}{continuation}{line}\n")
+
+    def _split_readable_lines(self, text: str) -> list[str]:
+        raw_lines = str(text or "").splitlines() or [""]
+        wrapped: list[str] = []
+        for raw_line in raw_lines:
+            pieces = textwrap.wrap(
+                raw_line,
+                width=MAX_TRANSCRIPT_LINE_CHARS,
+                break_long_words=True,
+                break_on_hyphens=False,
+                replace_whitespace=False,
+            )
+            wrapped.extend(pieces or [""])
+        return wrapped
 
     def set_show_timestamps(self, enabled: bool):
         self.show_timestamps = bool(enabled)
