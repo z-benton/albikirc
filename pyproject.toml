@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "albikirc"
 version = "0.1.0"
@@ -6,6 +10,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
   "wxPython>=4.2.1",
+  "pyobjc-framework-Cocoa>=11.0; sys_platform == 'darwin'",
+  "pyobjc-framework-AVFoundation>=11.0; sys_platform == 'darwin'",
 ]
 license = { file = "LICENSE" }
 classifiers = [
@@ -18,6 +24,15 @@ classifiers = [
 
 [project.scripts]
 albikirc = "albikirc.app:main"
+
+[dependency-groups]
+build = [
+  "pyinstaller>=6.0",
+]
+dev = [
+  "pyinstaller>=6.0",
+  "ruff>=0.15.0",
+]
 
 [tool.ruff]
 line-length = 100

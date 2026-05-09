@@ -14,12 +14,33 @@ A minimal, accessible IRC client using wxPython. Focused on VoiceOver (macOS) an
 
 ## Requirements
 - Python 3.12 or newer
-- `pip` and a working C/C++ toolchain as required by wxPython (>=4.2.1) on your OS
+- Recommended for source installs: `uv`
+- Fallback: `pip` and a working C/C++ toolchain as required by wxPython (>=4.2.1) on your OS
   - macOS: Xcode Command Line Tools installed (`xcode-select --install`)
   - Linux: GTK3 and development headers installed (see your distro docs)
   - Windows: Recent CPython + pip; wheels are usually available
 
-## Quickstart (virtual environment)
+## Quickstart (uv, recommended)
+`uv` creates and manages the project environment automatically from `pyproject.toml`
+and `uv.lock`, so you do not need to activate a virtualenv by hand.
+
+1) Install `uv` if needed: https://docs.astral.sh/uv/getting-started/installation/
+
+2) Install dependencies
+
+   - `uv sync`
+
+3) Run the app from source
+
+   - `uv run albikirc`
+
+4) Developer commands
+
+   - `uv sync --group dev`
+   - `uv run ruff check albikirc`
+   - `uv run python -m albikirc.app`
+
+## Quickstart (manual virtual environment fallback)
 The following creates an isolated virtual environment, installs dependencies, and runs the app from source.
 
 1) Create a virtual environment
@@ -52,6 +73,8 @@ The following creates an isolated virtual environment, installs dependencies, an
 ## Build macOS App (.app)
 - Script: `./build-macos.sh` builds a double‑clickable `dist/Albikirc.app` and a zip.
 - Cleanup: the script removes duplicates so only the `.app` remains (the extra `dist/Albikirc` folder is deleted). Use `--clean` to remove all build artifacts.
+- If `uv` is installed, the script uses `uv sync --group build` automatically.
+- Without `uv`, it falls back to an active/local virtualenv or creates `.venv-build/`.
 
 ### Basic Usage
 - Build: `./build-macos.sh`
@@ -64,9 +87,10 @@ The following creates an isolated virtual environment, installs dependencies, an
 - `--icon path.icns`: include a custom `.icns` as the app icon.
 - `--python /path/to/python3`: use a specific Python 3 interpreter.
 
-### Virtualenv Behavior
-- If an active virtualenv is detected, the script reuses it.
-- Otherwise, it looks for `.venv/` or `.venv310/` and reuses them if present.
+### Environment Behavior
+- If `uv` is installed, the script uses the locked project environment.
+- Otherwise, if an active virtualenv is detected, the script reuses it.
+- Otherwise, it looks for `.venv/` or `.venv312/` and reuses them if present.
 - If none are found, it creates and uses `.venv-build/` automatically.
 
 ### Architecture Notes
@@ -82,6 +106,8 @@ The following creates an isolated virtual environment, installs dependencies, an
 ## Build Linux Bundle
 - Script: `./build-linux.sh` builds a PyInstaller bundle at `dist/Albikirc` and a tarball at `dist/Albikirc-linux-<arch>.tar.gz` (skip the tarball with `--no-tar`).
 - Cleanup: use `--clean` to remove `build/`, `dist/`, and the generated spec file.
+- If `uv` is installed, the script uses `uv sync --group build` automatically.
+- Without `uv`, it falls back to an active/local virtualenv or creates `.venv-build/`.
 
 ### Basic Usage
 - Build: `./build-linux.sh`

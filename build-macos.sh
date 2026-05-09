@@ -66,8 +66,19 @@ done
 # Resolve Python 3.x (>=3.12). Prefer active or local venvs if present.
 PYTHON_BIN="${PYTHON_BIN:-}"
 USING_EXISTING_VENV=0
+USING_UV=0
 if [[ -z "${PYTHON_BIN}" ]]; then
-  if [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+  if command -v uv >/dev/null 2>&1 && [[ -f "pyproject.toml" ]]; then
+    echo "[env] Using uv project environment"
+    uv sync --group build
+    PYTHON_BIN="$(uv run python - <<'PY'
+import sys
+print(sys.executable)
+PY
+)"
+    USING_EXISTING_VENV=1
+    USING_UV=1
+  elif [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
     VENV_DIR="${VIRTUAL_ENV}"
     PYTHON_BIN="${VENV_DIR}/bin/python"
     USING_EXISTING_VENV=1
@@ -154,10 +165,13 @@ if [[ -n "${VENV_DIR}" ]]; then
   source "$VENV_DIR/bin/activate"
 fi
 
-echo "[build] Ensuring dependencies (offline-friendly)"
-# Best-effort tooling upgrade; continue if offline
-"${PYTHON_BIN}" -m pip install --upgrade pip wheel >/dev/null 2>&1 || true
-if ! "${PYTHON_BIN}" - <<'PY'
+if [[ "${USING_UV}" -eq 1 ]]; then
+  echo "[deps] Managed by uv"
+else
+  echo "[build] Ensuring dependencies (offline-friendly)"
+  # Best-effort tooling upgrade; continue if offline
+  "${PYTHON_BIN}" -m pip install --upgrade pip wheel >/dev/null 2>&1 || true
+  if ! "${PYTHON_BIN}" - <<'PY'
 import sys
 ok = True
 try:
@@ -174,14 +188,15 @@ except Exception:
     ok = False
 sys.exit(0 if ok else 1)
 PY
-then
-  echo "[deps] Installing wxPython, PyInstaller, and macOS speech dependencies"
-  if ! "${PYTHON_BIN}" -m pip install -q wxPython pyinstaller pyobjc-framework-Cocoa pyobjc-framework-AVFoundation; then
-    echo "[error] Failed to install build dependencies. Ensure network access or preinstall in ${VENV_DIR}." >&2
-    exit 1
+  then
+    echo "[deps] Installing wxPython, PyInstaller, and macOS speech dependencies"
+    if ! "${PYTHON_BIN}" -m pip install -q wxPython pyinstaller pyobjc-framework-Cocoa pyobjc-framework-AVFoundation; then
+      echo "[error] Failed to install build dependencies. Ensure network access or preinstall in ${VENV_DIR}." >&2
+      exit 1
+    fi
+  else
+    echo "[deps] Already satisfied"
   fi
-else
-  echo "[deps] Already satisfied"
 fi
 
 echo "[build] Cleaning previous build artifacts"
