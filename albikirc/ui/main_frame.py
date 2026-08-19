@@ -57,6 +57,8 @@ class MainFrame(wx.Frame):
         # Connection prefs
         conn = self.settings.get('connection', {})
         self.irc.enable_tcp_keepalive = bool(conn.get('tcp_keepalive_enabled', True))
+        self.irc.auto_reconnect = bool(conn.get('auto_reconnect', True))
+        self.irc.auto_rejoin = bool(conn.get('auto_rejoin', True))
         try:
             self.irc.tcp_keepalive_idle = int(conn.get('tcp_keepalive_idle', self.irc.tcp_keepalive_idle))
             self.irc.tcp_keepalive_interval = int(conn.get('tcp_keepalive_interval', self.irc.tcp_keepalive_interval))
@@ -943,6 +945,8 @@ class MainFrame(wx.Frame):
             self.irc.activity_window_seconds = int(self.settings['notifications'].get('activity_window_seconds', 10))
             self.irc.route_notices_inline = bool(self.settings['notifications'].get('notices_inline', True))
             self.irc.enable_tcp_keepalive = bool(self.settings['connection'].get('tcp_keepalive_enabled', True))
+            self.irc.auto_reconnect = bool(self.settings['connection'].get('auto_reconnect', True))
+            self.irc.auto_rejoin = bool(self.settings['connection'].get('auto_rejoin', True))
             try:
                 self.irc.tcp_keepalive_idle = int(self.settings['connection'].get('tcp_keepalive_idle', self.irc.tcp_keepalive_idle))
                 self.irc.tcp_keepalive_interval = int(self.settings['connection'].get('tcp_keepalive_interval', self.irc.tcp_keepalive_interval))
@@ -969,7 +973,7 @@ class MainFrame(wx.Frame):
                 self._channel_list_dialog.close_on_join = self._close_channel_list_on_join()
             save(self.settings)
             self._on_irc_status(
-                f"Updated preferences: nick='{self.settings['nick']}', timestamps={'on' if self._timestamps else 'off'}, theme={self._theme}, CTCP VERSION auto-reply={self.irc.respond_to_ctcp_version}, ignore CTCP={self.irc.ignore_ctcp}, show join/part notices={self.irc.show_join_part_notices}, show quit/nick notices={self.irc.show_quit_nick_notices}, compact summaries={self.irc.activity_summaries} ({self.irc.activity_window_seconds}s), notices inline={'on' if self.irc.route_notices_inline else 'off'}, TCP keepalive={'on' if self.irc.enable_tcp_keepalive else 'off'}"
+                f"Updated preferences: nick='{self.settings['nick']}', timestamps={'on' if self._timestamps else 'off'}, theme={self._theme}, CTCP VERSION auto-reply={self.irc.respond_to_ctcp_version}, ignore CTCP={self.irc.ignore_ctcp}, show join/part notices={self.irc.show_join_part_notices}, show quit/nick notices={self.irc.show_quit_nick_notices}, compact summaries={self.irc.activity_summaries} ({self.irc.activity_window_seconds}s), notices inline={'on' if self.irc.route_notices_inline else 'off'}, reconnect={'on' if self.irc.auto_reconnect else 'off'}, rejoin={'on' if self.irc.auto_rejoin else 'off'}, TCP keepalive={'on' if self.irc.enable_tcp_keepalive else 'off'}"
             )
         dlg.Destroy()
 
@@ -1462,7 +1466,7 @@ class MainFrame(wx.Frame):
             reason = ""
             if ' ' in arg:
                 chan, reason = arg.split(' ', 1)
-            self.irc._send_raw(f"PART {chan}{(' :' + reason) if reason else ''}")
+            self.irc.part_channel(chan, reason)
 
     def _handle_slash_nick(self, target, chat, arg):
         new = arg.strip()

@@ -66,6 +66,14 @@ DEFAULTS: Dict[str, Any] = {
         "activity_window_seconds": 10,
         "notices_inline": True,
     },
+    "connection": {
+        "auto_reconnect": True,
+        "auto_rejoin": True,
+        "tcp_keepalive_enabled": True,
+        "tcp_keepalive_idle": 120,
+        "tcp_keepalive_interval": 30,
+        "tcp_keepalive_count": 4,
+    },
     "tts": {
         "enabled": False,
         "interrupt": False,

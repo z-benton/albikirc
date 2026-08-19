@@ -165,6 +165,10 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
   - `Compact activity summaries`: batch join/part/kick into a single summary line per interval instead of many lines.
   - `Summary window (seconds)`: how long to batch activity before summarizing (default 10s).
   - `Show NOTICEs inline in tabs`: when enabled, NOTICEs targeting a channel or you (PM) appear inline in that conversation with a `[notice]` label; when disabled, they appear only as Console status lines.
+- Connection:
+  - `Reconnect automatically`: reconnect after an unexpected socket loss using bounded exponential backoff (2–60 seconds).
+  - `Rejoin channels after reconnecting`: after the server welcome completes, rejoin channels that were active before the connection was lost. Channels you part or are kicked from are not rejoined.
+  - Intentional disconnects, `/quit`, app shutdown, and choosing another server never trigger reconnect.
 - Sounds: A bundled sound pack is enabled by default with event-specific sounds for messages, mentions, notices, channel messages, and private/query messages. You can point each event to a custom file.
   - Playback interrupts in-flight clips so new alerts are heard immediately.
   - Experimental: Optional synthesized beep tones (ascending on send, descending on receive) remain opt-in.

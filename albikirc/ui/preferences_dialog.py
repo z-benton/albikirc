@@ -129,6 +129,16 @@ class PreferencesDialog(wx.Dialog):
 
         # --- Connection (TCP keepalive) ---
         conn = self._settings.get('connection', {})
+        self.chk_auto_reconnect = wx.CheckBox(p_conn, label="Reconnect automatically")
+        self.chk_auto_reconnect.SetName("Automatic reconnect checkbox")
+        self.chk_auto_reconnect.SetToolTip("Reconnect after an unexpected connection loss")
+        self.chk_auto_reconnect.SetValue(bool(conn.get('auto_reconnect', True)))
+
+        self.chk_auto_rejoin = wx.CheckBox(p_conn, label="Rejoin channels after reconnecting")
+        self.chk_auto_rejoin.SetName("Automatic channel rejoin checkbox")
+        self.chk_auto_rejoin.SetToolTip("Rejoin channels that were open before connection loss")
+        self.chk_auto_rejoin.SetValue(bool(conn.get('auto_rejoin', True)))
+
         self.chk_tcp_keepalive = wx.CheckBox(p_conn, label="Enable TCP keepalive")
         self.chk_tcp_keepalive.SetName("Enable TCP keepalive checkbox")
         self.chk_tcp_keepalive.SetToolTip("Send periodic TCP probes to keep idle connections alive")
@@ -332,7 +342,10 @@ class PreferencesDialog(wx.Dialog):
 
         # Connection group
         s_conn = wx.BoxSizer(wx.VERTICAL)
-        help_conn = wx.StaticText(p_conn, label="TCP keepalive helps maintain idle connections. Adjust timings if needed.")
+        help_conn = wx.StaticText(
+            p_conn,
+            label="Recover from connection loss and configure TCP keepalive probes.",
+        )
         try:
             help_conn.SetForegroundColour(wx.Colour(90, 90, 90))
             f = help_conn.GetFont()
@@ -341,6 +354,8 @@ class PreferencesDialog(wx.Dialog):
         except Exception:
             pass
         s_conn.Add(help_conn, 0, wx.ALL, 6)
+        s_conn.Add(self.chk_auto_reconnect, 0, wx.ALL, 6)
+        s_conn.Add(self.chk_auto_rejoin, 0, wx.ALL, 6)
         s_conn.Add(self.chk_tcp_keepalive, 0, wx.ALL, 6)
         row_idle = wx.BoxSizer(wx.HORIZONTAL)
         row_idle.Add(wx.StaticText(p_conn, label="Keepalive idle (seconds):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
@@ -1062,6 +1077,8 @@ class PreferencesDialog(wx.Dialog):
                 'notices_inline': self.chk_notices_inline.GetValue(),
             },
             'connection': {
+                'auto_reconnect': self.chk_auto_reconnect.GetValue(),
+                'auto_rejoin': self.chk_auto_rejoin.GetValue(),
                 'tcp_keepalive_enabled': self.chk_tcp_keepalive.GetValue(),
                 'tcp_keepalive_idle': int(self.spin_tcp_idle.GetValue()),
                 'tcp_keepalive_interval': int(self.spin_tcp_interval.GetValue()),
