@@ -19,7 +19,8 @@ guide future work.
 - Support multiple simultaneous server connections.
 - Per-server tab grouping or a server selector to prevent tab confusion.
 - Connection lifecycle UI: status, reconnect progress, and error details.
-- Auto-reconnect with backoff, limits, and manual cancel.
+- Add a retry-attempt limit and visible manual cancel action to the implemented
+  automatic reconnect/backoff lifecycle.
 - Auto-join channels on connect (per saved server).
 - Session restore: reopen tabs, reconnect optionally, and rejoin channels.
 - Persist per-server identity (nick, real name, username, SASL settings).
@@ -99,6 +100,6 @@ guide future work.
 ## Suggested Next Steps
 
 1) Add multi-server connection management and tab grouping.
-2) Implement reconnect and auto-join behavior.
+2) Extend reconnect with retry limits/manual cancellation and add per-saved-server auto-join.
 3) Expand IRCv3 capability support and user list accuracy.
 4) Add UX improvements: notifications, highlights, and logging.
