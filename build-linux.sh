@@ -24,14 +24,43 @@ Options:
   -h, --help              Show this help
 
 Notes:
-  - Requires GTK3 and related development libraries for wxPython.
+  - Requires GTK3 development libraries for wxPython (checked before building).
   - The output is built for the host architecture (e.g., x86_64, aarch64).
 USAGE
+}
+
+check_linux_build_deps() {
+  local missing=0
+
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    echo "[error] pkg-config is required to check for GTK 3 development files." >&2
+    missing=1
+  elif ! pkg-config --atleast-version=3.0.0 gtk+-3.0; then
+    echo "[error] GTK 3 development files were not found (pkg-config module: gtk+-3.0)." >&2
+    missing=1
+  fi
+
+  if ! command -v gcc >/dev/null 2>&1 || ! command -v g++ >/dev/null 2>&1; then
+    echo "[error] A C/C++ compiler is required to build wxPython from source." >&2
+    missing=1
+  fi
+
+  if [[ "${missing}" -ne 0 ]]; then
+    echo "[hint] Install the GTK 3 development package and compiler tools for your distribution." >&2
+    echo "[hint] Debian/Raspberry Pi OS/Ubuntu: sudo apt install build-essential pkg-config python3-dev libgtk-3-dev" >&2
+    echo "[hint] Fedora: sudo dnf install gcc-c++ pkgconf-pkg-config python3-devel gtk3-devel" >&2
+    echo "[hint] Arch Linux: sudo pacman -S base-devel pkgconf gtk3" >&2
+    return 1
+  fi
+
+  echo "[deps] GTK 3 development files and compiler tools found"
 }
 
 ICON_PATH=""
 MAKE_TAR=1
 ONEFILE=0
+PYTHON_BIN=""
+PYTHON_WAS_EXPLICIT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -44,6 +73,7 @@ while [[ $# -gt 0 ]]; do
       shift
       PYTHON_BIN="${1:-}"
       [[ -n "${PYTHON_BIN}" ]] || { echo "--python requires a path" >&2; exit 2; }
+      PYTHON_WAS_EXPLICIT=1
       ;;
     --icon)
       shift
@@ -66,6 +96,8 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+check_linux_build_deps || exit 1
 
 # Resolve Python 3.x (>=3.12). Prefer active or local venvs if present.
 PYTHON_BIN="${PYTHON_BIN:-}"
@@ -108,6 +140,12 @@ PY
     fi
     VENV_DIR="${DEFAULT_VENV_DIR}"
   fi
+fi
+
+# An explicitly selected system interpreter is a base interpreter, not an
+# install target. Keep pip away from distro-managed Python environments.
+if [[ "${PYTHON_WAS_EXPLICIT}" -eq 1 ]]; then
+  VENV_DIR="${DEFAULT_VENV_DIR}"
 fi
 
 # Verify version >= 3.12
@@ -161,7 +199,13 @@ fi
 # Create and/or activate venv if VENV_DIR is set and not active
 if [[ -n "${VENV_DIR}" && ! -d "$VENV_DIR" ]]; then
   echo "[build] Creating virtualenv at $VENV_DIR"
-  "$PYTHON_BIN" -m venv "$VENV_DIR"
+  if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+    echo "[error] Could not create ${VENV_DIR}. On Debian-based systems, install python3-venv." >&2
+    exit 1
+  fi
+fi
+if [[ -n "${VENV_DIR}" ]]; then
+  PYTHON_BIN="${PWD}/${VENV_DIR}/bin/python"
 fi
 # If we have a venv dir, activate it for PATH convenience (not strictly required)
 if [[ -n "${VENV_DIR}" ]]; then
@@ -190,8 +234,9 @@ sys.exit(0 if ok else 1)
 PY
   then
     echo "[deps] Installing wxPython and PyInstaller"
-    if ! "${PYTHON_BIN}" -m pip install -q wxPython pyinstaller; then
-      echo "[error] Failed to install wxPython/PyInstaller. Ensure network access or preinstall in ${VENV_DIR}." >&2
+    if ! "${PYTHON_BIN}" -m pip install wxPython pyinstaller; then
+      echo "[error] Failed to install wxPython/PyInstaller with ${PYTHON_BIN}." >&2
+      echo "[error] On Linux, install GTK3 development packages first; on Raspberry Pi, wxPython may need to build from source." >&2
       exit 1
     fi
   else
