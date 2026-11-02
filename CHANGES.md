@@ -13,6 +13,10 @@
 
 ### Bug Fixes
 
+*   Moved connection setup and socket teardown to background workers so slow DNS, TCP, or TLS setup does not block the interface. Superseded or cancelled attempts cannot replace a newer connection.
+*   Fixed channel user lists to accumulate all NAMES chunks, finish on 366, and preserve membership changes received during the reply. Nickname matching follows the server's IRC case mapping.
+*   Cleared user lists on disconnect, leaving a channel, or being kicked, and preserved the selected user during sidebar updates.
+
 *   Fixed SASL capability negotiation so authentication is not ended prematurely on `CAP LS`.
 *   Fixed nickname tracking after `/nick` changes so private-message routing keeps working without reconnecting.
 *   Fixed reconnect identity tracking so a nickname changed with `/nick` is reused after an unexpected disconnect.

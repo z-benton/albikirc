@@ -122,7 +122,10 @@ class ChatPanel(wx.Panel):
         self.input.SetValue("")
 
     def set_users(self, users: list[str]):
+        selected = self.user_list.GetStringSelection()
         self.user_list.Set(users)
+        if selected in users:
+            self.user_list.SetStringSelection(selected)
 
     # Events
     def _on_send_clicked(self, evt):

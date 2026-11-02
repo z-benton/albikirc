@@ -1765,6 +1765,10 @@ class MainFrame(wx.Frame):
             self._disable_sounds_due_error("unexpected exception during playback")
 
     def _on_irc_status(self, text: str):
+        if text.startswith(("Connecting to ", "Connected to ", "Connect failed:",
+                            "Connection error:", "Disconnected", "Reconnecting in ",
+                            "Reconnect attempt ", "Rejoining ")):
+            self.SetStatusText(text)
         chat = self._chat_for_target("Console", create=True)
         msg = text
         if text.startswith("CTCP "):

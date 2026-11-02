@@ -18,7 +18,8 @@ guide future work.
 
 - Support multiple simultaneous server connections.
 - Per-server tab grouping or a server selector to prevent tab confusion.
-- Connection lifecycle UI: status, reconnect progress, and error details.
+- Connection lifecycle UI: visible manual cancel and further error details. Background
+  setup, connection/error status updates, and reconnect progress are implemented.
 - Add a retry-attempt limit and visible manual cancel action to the implemented
   automatic reconnect/backoff lifecycle.
 - Auto-join channels on connect (per saved server).
@@ -28,11 +29,12 @@ guide future work.
 ### Core IRC Protocol Handling
 
 - Nick collision handling (RPL 433) with retries or suffixing.
-- Handle RPL_ENDOFNAMES (366) to signal complete user list.
+- [x] Accumulate NAMES reply chunks and handle RPL_ENDOFNAMES (366).
 - WHO/WHOX for accurate user list refresh on joins/parts.
 - MODE parsing for user and channel modes, including op/voice indicators.
 - Track and display channel topics (RPL_TOPIC/332) with edit support.
-- More robust handling for QUIT/PART to keep user lists accurate.
+- [x] Keep user lists accurate across JOIN/PART/KICK/QUIT/NICK, including changes
+  during NAMES replies and IRC nickname case matching.
 - Proper handling of numeric error replies (banned, invite-only, bad key).
 
 ### Authentication and Identity

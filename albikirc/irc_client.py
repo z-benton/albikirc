@@ -71,19 +71,27 @@ class IRCClient:
     _reconnect_attempt: int = field(default=0, init=False)
     _rejoining_after_reconnect: bool = field(default=False, init=False)
     _intentional_disconnect: bool = field(default=True, init=False)
-    _connection_serial: int = field(default=0, init=False)
+    connecting: bool = field(default=False, init=False)
+    _connect_thread: Optional[threading.Thread] = field(default=None, init=False)
     _state_lock: threading.RLock = field(default_factory=threading.RLock, init=False)
+    _connection_serial: int = field(default=0, init=False)
+    _names_pending: dict[str, set[str]] = field(default_factory=dict, init=False)
+    _names_changes: dict[str, list[tuple[str | None, str | None]]] = field(
+        default_factory=dict, init=False
+    )
+    _case_mapping: str = field(default="rfc1459", init=False)
+    _prefix_symbols: str = field(default="~&@%+", init=False)
     # In-memory channel membership tracking (lower-cased channel keys)
     _chan_users: dict[str, set[str]] = field(default_factory=dict, init=False)
     _chan_display: dict[str, str] = field(default_factory=dict, init=False)
     # Activity summaries batching
     _activity: dict[str, dict[str, set[str]]] = field(default_factory=dict, init=False)  # keys: 'join','part','kick'
     _activity_timers: dict[str, threading.Timer] = field(default_factory=dict, init=False)
-    _activity_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _activity_lock: threading.RLock = field(default_factory=threading.RLock, init=False)
     _max_irc_line_bytes: int = field(default=510, init=False)
 
     def _queue_activity(self, channel: str, *, joined: list[str] | None = None, parted: list[str] | None = None, kicked: list[str] | None = None):
-        key = channel.lower()
+        key = self._casefold(channel)
         with self._activity_lock:
             rec = self._activity.setdefault(key, {"join": set(), "part": set(), "kick": set()})
             if joined:
@@ -104,6 +112,10 @@ class IRCClient:
                     self._flush_activity(key)
 
     def _flush_activity(self, key: str):
+        with self._state_lock:
+            self._flush_activity_locked(key)
+
+    def _flush_activity_locked(self, key: str):
         with self._activity_lock:
             rec = self._activity.pop(key, None)
             t = self._activity_timers.pop(key, None)
@@ -151,11 +163,12 @@ class IRCClient:
 
     # Networking helpers
     def _send_raw(self, line: str):
-        if not self._sock:
+        sock = self._sock
+        if not sock:
             return
         data = (line + "\r\n").encode("utf-8", errors="ignore")
         try:
-            self._sock.sendall(data)
+            sock.sendall(data)
         except Exception as e:
             self._emit_status(f"Send error: {e}")
 
@@ -186,56 +199,39 @@ class IRCClient:
             self._send_raw(f"USER {self.nick} 0 * :{self._registration_realname()}")
             self._reg_sent = True
 
-    def _reader_loop(self, sock: socket.socket, stop_event: threading.Event, serial: int):
+    def _reader_loop(self, sock, stop_event, generation):
         buf = b""
         try:
             while not stop_event.is_set():
                 try:
                     chunk = sock.recv(4096)
                 except socket.timeout:
-                    # Ignore periodic read timeouts and continue waiting for data
                     continue
                 if not chunk:
                     break
                 buf += chunk
                 while b"\r\n" in buf:
                     line, buf = buf.split(b"\r\n", 1)
-                    try:
-                        self._handle_line(line.decode("utf-8", errors="ignore"))
-                    except Exception as e:
-                        self._emit_status(f"Parse error: {e}")
+                    with self._state_lock:
+                        if generation != self._connection_serial or stop_event.is_set():
+                            return
+                        try:
+                            self._handle_line(line.decode("utf-8", errors="ignore"))
+                        except Exception as e:
+                            self._emit_status(f"Parse error: {e}")
         except Exception as e:
-            if not stop_event.is_set():
-                self._emit_status(f"Connection error: {e}")
-        finally:
             with self._state_lock:
-                is_current = serial == self._connection_serial and self._sock is sock
-                unexpected = is_current and not self._intentional_disconnect
-                if is_current:
-                    self.connected = False
-                    self._sock = None
-            try:
-                sock.close()
-            except Exception:
-                pass
-            if is_current:
-                self._clear_connection_state()
-                self._emit_status("Disconnected")
-            if unexpected:
-                self._schedule_reconnect(serial)
-
-    def _clear_connection_state(self):
-        self._chan_users.clear()
-        self._chan_display.clear()
-        try:
-            for timer in list(self._activity_timers.values()):
-                try:
-                    timer.cancel()
-                except Exception:
-                    pass
+                if generation == self._connection_serial and not stop_event.is_set():
+                    self._emit_status(f"Connection error: {e}")
         finally:
-            self._activity_timers.clear()
-            self._activity.clear()
+            sock.close()
+            with self._state_lock:
+                if generation == self._connection_serial:
+                    self._sock = None
+                    self.connected = False
+                    self._clear_channels()
+                    self._emit_status("Disconnected")
+                    self._schedule_reconnect(generation)
 
     def _cancel_reconnect(self):
         with self._state_lock:
@@ -271,18 +267,15 @@ class IRCClient:
 
     def _reconnect(self, serial: int):
         with self._state_lock:
-            self._reconnect_timer = None
-            if (
-                self._intentional_disconnect
-                or not self.auto_reconnect
-                or serial != self._connection_serial
-                or not self._connection_args
-            ):
+            if serial != self._connection_serial:
                 return
-            args = self._connection_args
-        self._emit_status(f"Reconnect attempt {self._reconnect_attempt}...")
-        if not self._open_connection(*args, serial=serial, reconnecting=True):
-            self._schedule_reconnect(serial)
+            self._reconnect_timer = None
+            if (self._intentional_disconnect or not self.auto_reconnect
+                    or not self._connection_args):
+                return
+            self._emit_status(f"Reconnect attempt {self._reconnect_attempt}...")
+            self._connection_serial += 1
+            self._start_connection(*self._connection_args, reconnecting=True)
 
     def _parse_prefix(self, prefix: str) -> tuple[str, Optional[str]]:
         # returns (nick_or_server, userhost)
@@ -516,110 +509,171 @@ class IRCClient:
         nick = params[1]
         self._emit_status(f"WHOIS {nick}: {trailing}")
 
+    def _casefold(self, value: str) -> str:
+        value = value.lower()
+        if self._case_mapping == "ascii":
+            return value
+        value = value.translate(str.maketrans("[]\\", "{}|"))
+        return value.replace("^", "~") if self._case_mapping == "rfc1459" else value
+
+    def _handle_005(self, prefix, params, trailing):
+        for token in params[1:]:
+            if token.startswith("CASEMAPPING="):
+                mapping = token.split("=", 1)[1]
+                if mapping in ("ascii", "strict-rfc1459", "rfc1459"):
+                    self._case_mapping = mapping
+            elif token.startswith("PREFIX=(") and ")" in token:
+                self._prefix_symbols = token.split(")", 1)[1]
+
+    def _update_member(self, key: str, nick: str, present: bool):
+        users = self._chan_users.setdefault(key, set())
+        folded = self._casefold(nick)
+        users.difference_update({n for n in users if self._casefold(n) == folded})
+        if present:
+            users.add(nick)
+        if key in self._names_pending:
+            self._names_changes[key].append((None, nick) if present else (nick, None))
+
+    def _publish_members(self, key: str):
+        self._emit_users(self._chan_display.get(key, key),
+                         sorted(self._chan_users.get(key, set()), key=self._casefold))
+
+    def _forget_channel(self, key: str):
+        self._emit_users(self._chan_display.get(key, key), [])
+        self._chan_users.pop(key, None)
+        self._chan_display.pop(key, None)
+        self._names_pending.pop(key, None)
+        self._names_changes.pop(key, None)
+        with self._activity_lock:
+            timer = self._activity_timers.pop(key, None)
+            if timer:
+                timer.cancel()
+            self._activity.pop(key, None)
+
+    def _clear_channels(self):
+        for key in list(self._chan_users):
+            self._forget_channel(key)
+        self._names_pending.clear()
+        self._names_changes.clear()
+
     def _handle_join(self, prefix, params, trailing):
         sender, _ = self._parse_prefix(prefix or "")
         chan = (params[0] if params else trailing) or ""
-        if chan:
-            # Track membership
-            key = chan.lower()
-            if self.nick and sender.lower() == self.nick.lower():
-                self._desired_channels.setdefault(key, (chan, None))
-            self._chan_display[key] = chan
-            users = self._chan_users.setdefault(key, set())
-            users.add(sender)
-            # Emit updated user list
-            self._emit_users(self._chan_display.get(key, chan), sorted(users))
-            # Emit notice or queue activity summary
-            if self.activity_summaries:
-                self._queue_activity(chan, joined=[sender])
-            elif self.show_join_part_notices:
-                self._emit_message(chan, "*", f"{sender} joined {chan}")
+        if not chan:
+            return
+        key = self._casefold(chan)
+        if self._casefold(sender) == self._casefold(self.nick or ""):
+            self._desired_channels.setdefault(key, (chan, None))
+            if key in self._chan_users:
+                self._forget_channel(key)
+            self._names_pending[key] = set()
+            self._names_changes[key] = []
+        self._chan_display[key] = chan
+        self._update_member(key, sender, True)
+        self._publish_members(key)
+        if self.activity_summaries:
+            self._queue_activity(chan, joined=[sender])
+        elif self.show_join_part_notices:
+            self._emit_message(chan, "*", f"{sender} joined {chan}")
 
     def _handle_part(self, prefix, params, trailing):
         sender, _ = self._parse_prefix(prefix or "")
         chan = params[0] if params else ""
-        if chan:
-            if self.nick and sender.lower() == self.nick.lower():
-                self._desired_channels.pop(chan.lower(), None)
-            reason = trailing or ""
-            if not self.activity_summaries and self.show_join_part_notices:
-                self._emit_message(chan, "*", f"{sender} left {chan}{(' (' + reason + ')') if reason else ''}")
-            # Update membership
-            key = chan.lower()
-            users = self._chan_users.setdefault(key, set())
-            if sender in users:
-                users.remove(sender)
-            self._emit_users(self._chan_display.get(key, chan), sorted(users))
-            if self.activity_summaries:
-                self._queue_activity(chan, parted=[sender])
+        if not chan:
+            return
+        key = self._casefold(chan)
+        if self._casefold(sender) == self._casefold(self.nick or ""):
+            self._desired_channels.pop(key, None)
+            self._forget_channel(key)
+            return
+        self._update_member(key, sender, False)
+        self._publish_members(key)
+        if self.activity_summaries:
+            self._queue_activity(chan, parted=[sender])
+        elif self.show_join_part_notices:
+            reason = f" ({trailing})" if trailing else ""
+            self._emit_message(chan, "*", f"{sender} left {chan}{reason}")
 
     def _handle_kick(self, prefix, params, trailing):
         if len(params) < 2:
             return
-        chan = params[0]
-        victim = params[1]
-        kicker, _ = self._parse_prefix(prefix or "")
-        reason = trailing or ""
-        key = chan.lower()
-        if self.nick and victim.lower() == self.nick.lower():
+        chan, victim = params[:2]
+        key = self._casefold(chan)
+        if self._casefold(victim) == self._casefold(self.nick or ""):
             self._desired_channels.pop(key, None)
-        users = self._chan_users.setdefault(key, set())
-        if victim in users:
-            users.remove(victim)
-        # Update list regardless of notice preference
-        self._emit_users(self._chan_display.get(key, chan), sorted(users))
-        # Treat like a PART-style notice (respect preference)
+            self._forget_channel(key)
+            kicker, _ = self._parse_prefix(prefix or "")
+            self._emit_message(chan, "*", f"You were kicked by {kicker}: {trailing or ''}")
+            return
+        self._update_member(key, victim, False)
+        self._publish_members(key)
         if self.activity_summaries:
             self._queue_activity(chan, kicked=[victim])
         elif self.show_join_part_notices:
-            msg = f"{victim} was kicked from {chan} by {kicker}"
-            if reason:
-                msg += f" ({reason})"
-            self._emit_message(chan, "*", msg)
+            kicker, _ = self._parse_prefix(prefix or "")
+            reason = f" ({trailing})" if trailing else ""
+            self._emit_message(chan, "*", f"{victim} was kicked from {chan} by {kicker}{reason}")
 
     def _handle_quit(self, prefix, params, trailing):
         sender, _ = self._parse_prefix(prefix or "")
-        reason = trailing or ""
-        # Without tracking channel membership, request NAMES on all known channels would be ideal
-        # If we are in any channels, the server will often send PART/QUIT effects; request a global NAMES refresh is not possible
         if self.show_quit_nick_notices:
-            self._emit_status(f"{sender} quit IRC{(' (' + reason + ')') if reason else ''}")
-        # Remove from all tracked channels and emit user updates
-        for key, users in list(self._chan_users.items()):
-            if sender in users:
-                users.remove(sender)
-                self._emit_users(self._chan_display.get(key, key), sorted(users))
+            reason = f" ({trailing})" if trailing else ""
+            self._emit_status(f"{sender} quit IRC{reason}")
+        for key in list(self._chan_users):
+            self._update_member(key, sender, False)
+            self._publish_members(key)
 
     def _handle_nick(self, prefix, params, trailing):
         sender, _ = self._parse_prefix(prefix or "")
         new_nick = trailing or (params[0] if params else "")
-        if new_nick:
-            if self.nick and sender.lower() == self.nick.lower():
-                self.nick = new_nick
-                with self._state_lock:
-                    if self._connection_args:
-                        host, port, _nick, real_name, use_tls = self._connection_args
-                        self._connection_args = (host, port, new_nick, real_name, use_tls)
-            if self.show_quit_nick_notices:
-                self._emit_status(f"{sender} is now known as {new_nick}")
-            # Rename in all tracked channels
-            for key, users in list(self._chan_users.items()):
-                if sender in users:
-                    users.remove(sender)
-                    users.add(new_nick)
-                    self._emit_users(self._chan_display.get(key, key), sorted(users))
+        if not new_nick:
+            return
+        if self._casefold(sender) == self._casefold(self.nick or ""):
+            self.nick = new_nick
+            if self._connection_args:
+                host, port, _nick, real_name, use_tls = self._connection_args
+                self._connection_args = (host, port, new_nick, real_name, use_tls)
+        if self.show_quit_nick_notices:
+            self._emit_status(f"{sender} is now known as {new_nick}")
+        for key, users in list(self._chan_users.items()):
+            present = any(self._casefold(n) == self._casefold(sender) for n in users)
+            users.difference_update({n for n in users if self._casefold(n) == self._casefold(sender)})
+            if present:
+                users.add(new_nick)
+            if key in self._names_pending:
+                self._names_changes[key].append((sender, new_nick))
+            self._publish_members(key)
 
-    def _handle_353(self, prefix, params, trailing):  # RPL_NAMREPLY
+    def _handle_353(self, prefix, params, trailing):
         if len(params) < 3 or trailing is None:
             return
         channel = params[2]
-        names = [n.lstrip("@+") for n in trailing.split()]
-        key = channel.lower()
+        key = self._casefold(channel)
         self._chan_display[key] = channel
-        self._chan_users[key] = set(names)
-        self._emit_users(channel, sorted(self._chan_users[key]))
+        if key not in self._names_pending:
+            self._names_pending[key] = set()
+            self._names_changes[key] = []
+        names = self._names_pending[key]
+        names.update(n.lstrip(self._prefix_symbols).split("!", 1)[0] for n in trailing.split())
+        # Live JOIN/PART/NICK/QUIT events take precedence over later snapshot chunks.
+        merged = {self._casefold(n): n for n in names}
+        for old, new in self._names_changes[key]:
+            if old is None:
+                merged[self._casefold(new)] = new
+            else:
+                removed = merged.pop(self._casefold(old), None)
+                if new is not None and removed is not None:
+                    merged[self._casefold(new)] = new
+        self._chan_users[key] = set(merged.values())
+        self._publish_members(key)
 
-    # RPL_ENDOFNAMES (366) could be handled to signal completion
+    def _handle_366(self, prefix, params, trailing):
+        if len(params) < 2:
+            return
+        key = self._casefold(params[1])
+        self._names_pending.pop(key, None)
+        self._names_changes.pop(key, None)
+        self._publish_members(key)
 
     def _handle_321(self, prefix, params, trailing):  # RPL_LISTSTART
         self._emit_channel_list_start()
@@ -638,136 +692,114 @@ class IRCClient:
         self._emit_channel_list_end()
 
     # Public API
-    def connect(self, host: str, port: int, nick: str, *, real_name: str | None = None, use_tls: bool = True):
-        self.disconnect()
-        self._desired_channels.clear()
-        self.nick = nick
-        self.real_name = (real_name or "").strip() or None
+    def connect(self, host: str, port: int, nick: str, *,
+                real_name: str | None = None, use_tls: bool = True):
+        """Start connection setup in a worker; return without waiting for the network."""
         with self._state_lock:
-            self._connection_serial += 1
-            serial = self._connection_serial
-            self._connection_args = (host, port, nick, self.real_name, use_tls)
+            self.disconnect()
+            self._desired_channels.clear()
+            self._connection_args = (host, port, nick, real_name, use_tls)
             self._intentional_disconnect = False
             self._reconnect_attempt = 0
             self._rejoining_after_reconnect = False
-        self._open_connection(host, port, nick, self.real_name, use_tls, serial=serial)
+            self._start_connection(host, port, nick, real_name, use_tls)
 
-    def _open_connection(
-        self,
-        host: str,
-        port: int,
-        nick: str,
-        real_name: str | None,
-        use_tls: bool,
-        *,
-        serial: int,
-        reconnecting: bool = False,
-    ) -> bool:
+    def _start_connection(self, host, port, nick, real_name, use_tls, reconnecting=False):
+        """Launch an attempt while the caller holds the state lock."""
         self.nick = nick
-        self.real_name = real_name
+        self.real_name = (real_name or "").strip() or None
         self._reg_sent = False
         self._cap_in_progress = False
         self._awaiting_auth_plus = False
         self._quit_sent = False
-        stop_event = threading.Event()
+        self._case_mapping = "rfc1459"
+        self._prefix_symbols = "~&@%+"
+        self._stop_event = threading.Event()
+        self.connecting = True
+        generation = self._connection_serial
+        certfile, keyfile = self.tls_client_certfile, self.tls_client_keyfile
+        registration = []
+        if (self.server_password or "").strip():
+            registration.append(f"PASS {self.server_password}")
+        if self.sasl_enabled:
+            registration.extend(["CAP LS 302", "CAP REQ :sasl"])
+        else:
+            registration.extend([f"NICK {nick}",
+                                 f"USER {nick} 0 * :{self._registration_realname()}"])
+        keepalive = (self.enable_tcp_keepalive, self.tcp_keepalive_idle,
+                     self.tcp_keepalive_interval, self.tcp_keepalive_count)
+        self._emit_status(f"Connecting to {host}:{port} as {nick}")
+        self._connect_thread = threading.Thread(
+            target=self._connect_worker,
+            args=(host, port, use_tls, certfile, keyfile, generation, self._stop_event,
+                  registration, self.sasl_enabled, keepalive, reconnecting),
+            name="irc-connect", daemon=True,
+        )
+        self._connect_thread.start()
+
+    def _connect_worker(self, host, port, use_tls, certfile, keyfile, generation, stop_event,
+                        registration, sasl_enabled, keepalive, reconnecting):
         sock = None
-        raw_sock = None
         try:
-            raw_sock = socket.create_connection((host, port), timeout=15)
+            sock = socket.create_connection((host, port), timeout=15)
+            if stop_event.is_set():
+                return
             if use_tls:
                 ctx = ssl.create_default_context()
-                ctx.check_hostname = True
-                ctx.verify_mode = ssl.CERT_REQUIRED
-                try:
-                    if self.tls_client_certfile:
-                        ctx.load_cert_chain(certfile=self.tls_client_certfile, keyfile=self.tls_client_keyfile or None)
-                except Exception as e:
-                    self._emit_status(f"TLS client cert load failed: {e}")
-                sock = ctx.wrap_socket(raw_sock, server_hostname=host)
-            else:
-                sock = raw_sock
+                if certfile:
+                    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile or None)
+                sock = ctx.wrap_socket(sock, server_hostname=host)
+            # Bound writes and let the reader periodically observe cancellation.
+            sock.settimeout(1)
+            keepalive_enabled = self._configure_keepalive(sock, keepalive)
+            for line in registration:
+                if stop_event.is_set():
+                    return
+                sock.sendall((line + "\r\n").encode("utf-8", errors="ignore"))
             with self._state_lock:
-                if serial != self._connection_serial or self._intentional_disconnect:
-                    sock.close()
-                    return False
+                if generation != self._connection_serial or stop_event.is_set():
+                    return
                 self._sock = sock
-                self._stop_event = stop_event
+                self._reg_sent = not sasl_enabled
+                self._cap_in_progress = sasl_enabled
                 self._rejoining_after_reconnect = reconnecting
-            # Clear the connect-time timeout so recv() blocks indefinitely
-            try:
-                sock.settimeout(None)
-            except Exception:
-                pass
-
-            # Optionally enable TCP keepalive (best-effort; platform specific tuning)
-            if self.enable_tcp_keepalive:
-                try:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-                    # Linux: TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT
-                    if hasattr(socket, 'TCP_KEEPIDLE'):
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, int(self.tcp_keepalive_idle))
-                    # macOS/BSD: TCP_KEEPALIVE (idle seconds)
-                    if hasattr(socket, 'TCP_KEEPALIVE'):
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPALIVE, int(self.tcp_keepalive_idle))
-                    if hasattr(socket, 'TCP_KEEPINTVL'):
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, int(self.tcp_keepalive_interval))
-                    if hasattr(socket, 'TCP_KEEPCNT'):
-                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, int(self.tcp_keepalive_count))
-                    self._emit_status("TCP keepalive enabled")
-                except Exception:
-                    # Non-fatal if keepalive tuning fails
-                    pass
-            with self._state_lock:
-                if serial != self._connection_serial or self._intentional_disconnect:
-                    sock.close()
-                    return False
+                self.connecting = False
                 self.connected = True
-                rx_thread = threading.Thread(
-                    target=self._reader_loop,
-                    args=(sock, stop_event, serial),
-                    name="irc-reader",
-                    daemon=True,
+                if keepalive_enabled:
+                    self._emit_status("TCP keepalive enabled")
+                self._emit_status(f"Connected to {host}:{port}{' (TLS)' if use_tls else ''}")
+                self._rx_thread = threading.Thread(
+                    target=self._reader_loop, args=(sock, stop_event, generation),
+                    name="irc-reader", daemon=True,
                 )
-                self._rx_thread = rx_thread
-            self._emit_status(f"Connected to {host}:{port}{' (TLS)' if use_tls else ''}")
-            with self._state_lock:
-                if (
-                    serial != self._connection_serial
-                    or self._intentional_disconnect
-                    or self._rx_thread is not rx_thread
-                ):
-                    return False
-                rx_thread.start()
-
-            # CAP/SASL negotiation (before sending NICK/USER)
-            # Send PASS first if provided (must precede NICK/USER)
-            if (self.server_password or "").strip():
-                self._send_raw(f"PASS {self.server_password}")
-
-            if self.sasl_enabled:
-                self._cap_in_progress = True
-                self._send_raw("CAP LS 302")
-                self._send_raw("CAP REQ :sasl")
-            else:
-                # No SASL: send registration now
-                self._send_raw(f"NICK {nick}")
-                self._send_raw(f"USER {nick} 0 * :{self._registration_realname()}")
-                self._reg_sent = True
-            return True
+                self._rx_thread.start()
+                sock = None  # The reader owns the socket now.
         except Exception as e:
-            stop_event.set()
-            try:
-                if sock:
-                    sock.close()
-                elif raw_sock:
-                    raw_sock.close()
-            except Exception:
-                pass
             with self._state_lock:
-                if serial == self._connection_serial:
+                if generation == self._connection_serial and not stop_event.is_set():
                     self.connected = False
+                    self.connecting = False
                     self._sock = None
-            self._emit_status(f"Connect failed: {e}")
+                    self._emit_status(f"Connect failed: {e}")
+                    if reconnecting:
+                        self._schedule_reconnect(generation)
+        finally:
+            if sock is not None:
+                sock.close()
+
+    @staticmethod
+    def _configure_keepalive(sock, options) -> bool:
+        enabled, idle, interval, count = options
+        if not enabled:
+            return False
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for option, value in (("TCP_KEEPIDLE", idle), ("TCP_KEEPALIVE", idle),
+                                  ("TCP_KEEPINTVL", interval), ("TCP_KEEPCNT", count)):
+                if hasattr(socket, option):
+                    sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, option), int(value))
+            return True
+        except (OSError, TypeError, ValueError):
             return False
 
     def join_channel(self, channel: str, key: str | None = None):
@@ -776,7 +808,7 @@ class IRCClient:
             return
         if not channel.startswith("#") and not channel.startswith("&"):
             channel = f"#{channel}"
-        self._desired_channels[channel.lower()] = (channel, key)
+        self._desired_channels[self._casefold(channel)] = (channel, key)
         self._send_join(channel, key)
 
     def _send_join(self, channel: str, key: str | None = None):
@@ -788,7 +820,7 @@ class IRCClient:
     def part_channel(self, channel: str, reason: str = ""):
         if not channel.startswith("#") and not channel.startswith("&"):
             channel = f"#{channel}"
-        self._desired_channels.pop(channel.lower(), None)
+        self._desired_channels.pop(self._casefold(channel), None)
         if not self.connected:
             self._emit_status("Not connected.")
             return
@@ -894,40 +926,37 @@ class IRCClient:
         except Exception as e:
             self._emit_status(f"Send error: {e}")
 
-    def disconnect(self):
-        self._intentional_disconnect = True
-        self._cancel_reconnect()
-        with self._state_lock:
-            self._connection_serial += 1
-            sock = self._sock
-            stop_event = self._stop_event
-            rx_thread = self._rx_thread
-            was_connected = self.connected
-            if sock and not self._quit_sent:
-                try:
-                    sock.sendall(b"QUIT :Bye\r\n")
-                    self._quit_sent = True
-                except Exception:
-                    pass
-            stop_event.set()
-            self._sock = None
-            self._rx_thread = None
-            self.connected = False
+    @staticmethod
+    def _close_socket(sock, send_quit):
         try:
-            if sock:
-                try:
-                    sock.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    sock.close()
-                except Exception:
-                    pass
+            if send_quit:
+                sock.sendall(b"QUIT :Bye\r\n")
+        except OSError:
+            pass
         finally:
-            if rx_thread and rx_thread.is_alive() and rx_thread is not threading.current_thread():
-                rx_thread.join(timeout=2)
-            self._clear_connection_state()
-            # Do not clear nick; keep for PM routing until next connect
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+
+    def disconnect(self):
+        """Invalidate pending work immediately; close the old socket off the UI thread."""
+        with self._state_lock:
+            self._intentional_disconnect = True
+            self._cancel_reconnect()
+            was_active = self.connected or self.connecting
+            self._connection_serial += 1
+            self._stop_event.set()
+            sock, self._sock = self._sock, None
+            send_quit = not self._quit_sent
+            self.connected = False
+            self.connecting = False
+            self._rx_thread = None
+            self._clear_channels()
             self._quit_sent = False
-            if was_connected:
+            if was_active:
                 self._emit_status("Disconnected")
+            if sock is not None:
+                threading.Thread(target=self._close_socket, args=(sock, send_quit),
+                                 name="irc-disconnect", daemon=True).start()

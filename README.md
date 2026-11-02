@@ -151,7 +151,9 @@ Implemented in this version: window/tab restore, timestamps, minimal theme, and 
 <!-- SwiftUI prototype not included in this repo; section removed to avoid confusion. -->
 
 ## Notes
-- The client implements a simple threaded IRC engine with optional TLS.
+- The client implements a threaded IRC engine with optional TLS. Connection setup
+  runs in a background worker; starting another connection or closing the app
+  invalidates the pending attempt.
   - Use the Connect dialog to specify host, port, nick, TLS, optional SASL credentials, and optional TLS client certificate.
 
 ## License
@@ -176,7 +178,9 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
 
 ## Behavior Details
 - Message tags: The client strips IRCv3 message tags (lines starting with `@`) for robust parsing, so messages from servers with tags display correctly.
-- User list tracking: The client maintains in‑memory channel membership and updates the sidebar immediately on JOIN/PART/KICK/QUIT/NICK without issuing extra `NAMES` calls. Initial membership is populated from `RPL_NAMREPLY` (353) after you join.
+- User list tracking: The client maintains in‑memory channel membership and updates the sidebar immediately on JOIN/PART/KICK/QUIT/NICK without issuing extra `NAMES` calls. Initial membership accumulates across `RPL_NAMREPLY` (353) chunks until
+  `RPL_ENDOFNAMES` (366), preserving membership changes received in between.
+  Leaving a channel, being kicked, or disconnecting clears its user list.
 - Activity summaries: When enabled, the client emits a single line like `[activity] 3 joined (alice, bob, cara); 1 left (dave)` per channel after the configured summary window. A copy is shown in the status bar for quick review.
 - PM/Query routing: If the message target equals your nick, the message is routed to a private tab with the sender’s name. Preferences include a distinct sound for private/query messages.
 - ACTION (`/me`): Incoming CTCP ACTION shows as `* nick action`. Outgoing `/me` is echoed as `* <your-nick> action` for consistency.
@@ -203,3 +207,16 @@ This project is licensed under the Apache License, Version 2.0. See the `LICENSE
 ## Troubleshooting
 - wxPython install issues: Ensure you are using a Python version with available wheels for your OS. If compilation is required, install platform build tools and GTK3 dev packages (Linux) or Xcode CLT (macOS). Consult https://wxpython.org/pages/downloads/ for guidance.
 - GUI backend errors on Linux: Verify the necessary GTK libraries are present and try running from an X11 session if Wayland causes issues.
+
+## Regression checks
+
+Run `uv run python -m unittest discover -s tests -v` (or use your virtualenv's Python).
+The tests use local socket pairs and simulated connection delays; no external IRC
+server or saved configuration is needed. Scenarios cover slow connection/TLS
+cancellation, reconnect races, registration order, multi-chunk NAMES replies,
+interleaved membership events, and disconnect cleanup.
+
+For manual verification, run `uv run albikirc`, connect to a slow or unreachable
+host, and check that menus, message input, and window closing remain responsive.
+On a working server, join a populated channel, check the complete user list, then
+verify JOIN/PART/NICK/QUIT updates and a clean list after leaving and rejoining.
