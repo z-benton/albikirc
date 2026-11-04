@@ -1,18 +1,25 @@
 import sys
+from copy import deepcopy
 
 import wx
-from ..mac_speech import MacSpeechBackend
 
-class PreferencesDialog(wx.Dialog):
-    def __init__(self, parent, settings):
+from .speech_controls import (
+    MAX_SPEECH_RATE, MIN_SPEECH_RATE, SPEECH_EVENTS, SpeechChoicesMixin,
+)
+from .speech_preview import SpeechPreview
+
+class PreferencesDialog(SpeechChoicesMixin, wx.Dialog):
+    def __init__(self, parent, settings, *, speech_page=False):
         super().__init__(parent, title="Preferences")
         self.SetName("Preferences dialog")
 
         # Current settings
-        self._settings = settings or {}
+        self._settings = deepcopy(settings or {})
+        self._speech_preview = SpeechPreview()
 
         # Notebook to organize categories
         book = wx.Notebook(self)
+        self.book = book
 
         # Panels per tab
         p_app = wx.Panel(book)
@@ -159,15 +166,15 @@ class PreferencesDialog(wx.Dialog):
         # --- Text to Speech ---
         tts_cfg = self._settings.get('tts', {}) or {}
         self.chk_tts_enabled = wx.CheckBox(p_tts, label="Enable text-to-speech")
-        self.chk_tts_enabled.SetName("Enable TTS checkbox")
+        self.chk_tts_enabled.SetName("Enable text-to-speech")
         self.chk_tts_enabled.SetValue(bool(tts_cfg.get('enabled', False)))
         self.chk_tts_enabled.SetToolTip("Speak selected events using system text-to-speech")
         self.chk_tts_interrupt = wx.CheckBox(p_tts, label="Interrupt speech with newer messages")
-        self.chk_tts_interrupt.SetName("Interrupt TTS checkbox")
+        self.chk_tts_interrupt.SetName("Interrupt speech with newer messages")
         self.chk_tts_interrupt.SetToolTip("Stop any ongoing speech when another event needs to speak")
         self.chk_tts_interrupt.SetValue(bool(tts_cfg.get('interrupt', False)))
         self.chk_tts_voiceover = wx.CheckBox(p_tts, label="Experimental: announce via VoiceOver when available (macOS)")
-        self.chk_tts_voiceover.SetName("Use VoiceOver for TTS checkbox")
+        self.chk_tts_voiceover.SetName("Use VoiceOver announcements")
         self.chk_tts_voiceover.SetToolTip("Use VoiceOver announcements instead of the app speech voice when available. Requires VoiceOver and AppleScript control to be enabled.")
         self.chk_tts_voiceover.SetValue(bool(tts_cfg.get('use_voiceover', False)))
         if sys.platform != 'darwin':
@@ -177,34 +184,45 @@ class PreferencesDialog(wx.Dialog):
         sel_voice = str(tts_cfg.get('voice', 'Default'))
         self._last_tts_voice = sel_voice or 'Default'
         self.txt_tts_voice = wx.StaticText(p_tts, label=self._last_tts_voice or 'Default')
-        self.txt_tts_voice.SetName("Current TTS voice label")
-        self.btn_tts_choose = wx.Button(p_tts, label="Choose Voice…")
-        self.btn_tts_choose.SetName("Choose TTS voice button")
+        self.txt_tts_voice.SetName("Current speech voice")
+        self.btn_tts_choose = wx.Button(p_tts, label="Choose voice…")
+        self.btn_tts_choose.SetName("Choose voice")
         self.Bind(wx.EVT_BUTTON, self._on_tts_choose_voice, self.btn_tts_choose)
+
+        self._tts_languages = self._speech_languages()
+        self.choice_tts_language = wx.Choice(
+            p_tts, choices=[self._friendly_lang_label(code) for code in self._tts_languages]
+        )
+        self.choice_tts_language.SetName("Speech language")
+        self._select_tts_language(str(tts_cfg.get('language', '') or ''))
+        self.choice_tts_language.Bind(wx.EVT_CHOICE, self._on_tts_language)
+        self._update_tts_voice_label()
 
         # Speech rate (WPM)
         try:
             default_wpm = int(tts_cfg.get('rate_wpm', 180))
         except Exception:
             default_wpm = 180
-        self.spin_tts_wpm = wx.SpinCtrl(p_tts, min=60, max=600, initial=default_wpm)
-        self.spin_tts_wpm.SetName("TTS words per minute")
+        self.spin_tts_wpm = wx.SpinCtrl(
+            p_tts, min=MIN_SPEECH_RATE, max=MAX_SPEECH_RATE, initial=default_wpm
+        )
+        self.spin_tts_wpm.SetName("Speaking rate (words per minute)")
         self.spin_tts_wpm.SetToolTip("Approximate speaking rate in words per minute")
 
         # Event checkboxes
         ev = tts_cfg.get('events', {}) or {}
-        self.chk_tts_channel = wx.CheckBox(p_tts, label="Channel messages")
+        self.chk_tts_channel = wx.CheckBox(p_tts, label=dict(SPEECH_EVENTS)["channel_message"])
         self.chk_tts_channel.SetValue(bool(ev.get('channel_message', False)))
-        self.chk_tts_channel.SetName("TTS channel messages checkbox")
-        self.chk_tts_private = wx.CheckBox(p_tts, label="Private/query messages")
+        self.chk_tts_channel.SetName("Channel messages")
+        self.chk_tts_private = wx.CheckBox(p_tts, label=dict(SPEECH_EVENTS)["private_message"])
         self.chk_tts_private.SetValue(bool(ev.get('private_message', False)))
-        self.chk_tts_private.SetName("TTS private messages checkbox")
-        self.chk_tts_mentions = wx.CheckBox(p_tts, label="Mentions (your nick in channel)")
+        self.chk_tts_private.SetName("Private messages")
+        self.chk_tts_mentions = wx.CheckBox(p_tts, label=dict(SPEECH_EVENTS)["mention"])
         self.chk_tts_mentions.SetValue(bool(ev.get('mention', True)))
-        self.chk_tts_mentions.SetName("TTS mentions checkbox")
-        self.chk_tts_notices = wx.CheckBox(p_tts, label="Notices")
+        self.chk_tts_mentions.SetName("Mentions (your nick in channel)")
+        self.chk_tts_notices = wx.CheckBox(p_tts, label=dict(SPEECH_EVENTS)["notice"])
         self.chk_tts_notices.SetValue(bool(ev.get('notice', False)))
-        self.chk_tts_notices.SetName("TTS notices checkbox")
+        self.chk_tts_notices.SetName("Notices")
 
         # Layout per tab
         # Appearance
@@ -383,29 +401,45 @@ class PreferencesDialog(wx.Dialog):
             pass
         s_tts.Add(help_tts, 0, wx.ALL, 6)
         s_tts.Add(self.chk_tts_enabled, 0, wx.ALL, 6)
-        s_tts.Add(self.chk_tts_interrupt, 0, wx.LEFT | wx.RIGHT, 12)
-        s_tts.Add(self.chk_tts_voiceover, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
+        row_language = wx.BoxSizer(wx.HORIZONTAL)
+        row_language.Add(wx.StaticText(p_tts, label="Language:"), 0,
+                         wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        row_language.Add(self.choice_tts_language, 1)
+        s_tts.Add(row_language, 0, wx.EXPAND | wx.ALL, 6)
         row_voice = wx.BoxSizer(wx.HORIZONTAL)
         row_voice.Add(wx.StaticText(p_tts, label="Voice:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         row_voice.Add(self.txt_tts_voice, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         row_voice.Add(self.btn_tts_choose, 0)
         s_tts.Add(row_voice, 0, wx.EXPAND | wx.ALL, 6)
         row_rate = wx.BoxSizer(wx.HORIZONTAL)
-        row_rate.Add(wx.StaticText(p_tts, label="Rate (words per minute):"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
+        row_rate.Add(
+            wx.StaticText(p_tts, label="Speaking rate (words per minute):"),
+            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6
+        )
         row_rate.Add(self.spin_tts_wpm, 0)
         s_tts.Add(row_rate, 0, wx.ALL, 6)
         # Test speech button
-        self.btn_tts_test = wx.Button(p_tts, label="Test Speech")
-        self.btn_tts_test.SetName("Test TTS button")
+        self.btn_tts_test = wx.Button(p_tts, label="Test speech")
+        self.btn_tts_test.SetName("Test speech")
         self.btn_tts_test.SetToolTip("Speak a sample line using the current voice and rate")
         s_tts.Add(self.btn_tts_test, 0, wx.ALL, 6)
         self.Bind(wx.EVT_BUTTON, self._on_tts_test, self.btn_tts_test)
-        s_tts.Add(wx.StaticText(p_tts, label="Speak for:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
+        s_tts.Add(wx.StaticText(p_tts, label="Speak:"), 0, wx.LEFT | wx.RIGHT | wx.TOP, 6)
         s_tts.Add(self.chk_tts_mentions, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
         s_tts.Add(self.chk_tts_channel, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
         s_tts.Add(self.chk_tts_private, 0, wx.LEFT | wx.RIGHT | wx.TOP, 12)
         s_tts.Add(self.chk_tts_notices, 0, wx.LEFT | wx.RIGHT | wx.TOP | wx.BOTTOM, 12)
+        s_tts.Add(self.chk_tts_interrupt, 0, wx.ALL, 6)
+        s_tts.Add(self.chk_tts_voiceover, 0, wx.ALL, 6)
         p_tts.SetSizer(s_tts)
+        speech_controls = [
+            self.chk_tts_enabled, self.choice_tts_language, self.btn_tts_choose,
+            self.spin_tts_wpm, self.btn_tts_test, self.chk_tts_mentions,
+            self.chk_tts_channel, self.chk_tts_private, self.chk_tts_notices,
+            self.chk_tts_interrupt, self.chk_tts_voiceover,
+        ]
+        for previous, current in zip(speech_controls, speech_controls[1:]):
+            current.MoveAfterInTabOrder(previous)
 
         # Add tabs
         book.AddPage(p_app, "Appearance")
@@ -415,6 +449,8 @@ class PreferencesDialog(wx.Dialog):
         book.AddPage(p_notif, "Notifications")
         book.AddPage(p_conn, "Connection")
         book.AddPage(p_tts, "Text to Speech")
+        if speech_page:
+            book.SetSelection(book.GetPageCount() - 1)
 
         # Dialog layout
         top = wx.BoxSizer(wx.VERTICAL)
@@ -423,361 +459,46 @@ class PreferencesDialog(wx.Dialog):
         top.Add(btns, 0, wx.EXPAND | wx.ALL, 8)
         self.SetSizerAndFit(top)
 
-    # --- TTS helpers ---
-    def _tts_get_voices(self) -> list[str]:
-        try:
-            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
-                names = [str(v.get('name') or 'Voice') for v in MacSpeechBackend().available_voices()]
-                if names:
-                    seen = set()
-                    out = []
-                    for n in names:
-                        if n not in seen:
-                            seen.add(n)
-                            out.append(n)
-                    return out
-            # 1) Prefer wx.TextToSpeech enumeration
-            TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
-            if TTS is not None:
-                try:
-                    tts = TTS()
-                    if hasattr(tts, 'GetVoices'):
-                        vs = tts.GetVoices()
-                        names = []
-                        try:
-                            for v in vs:
-                                name = None
-                                for attr in ('GetName', 'GetDescription', 'Name'):
-                                    if hasattr(v, attr):
-                                        val = getattr(v, attr)
-                                        name = val() if callable(val) else val
-                                        break
-                                if not name and isinstance(v, (list, tuple)) and v:
-                                    name = str(v[0])
-                                names.append(str(name or "Voice"))
-                        except Exception:
-                            pass
-                        if names:
-                            # Deduplicate while preserving order
-                            seen = set()
-                            out = []
-                            for n in names:
-                                if n not in seen:
-                                    seen.add(n)
-                                    out.append(n)
-                            return out
-                except Exception:
-                    pass
-            # 2) OS-level enumeration fallbacks
-            import subprocess
-            # macOS: say -v ? (with optional language filter)
-            if sys.platform == 'darwin':
-                try:
-                    p = subprocess.Popen(["say", "-v", "?"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    out, _ = p.communicate(timeout=3)
-                    # Determine selected language (if any) from current settings
-                    sel_lang = ''
-                    try:
-                        sel_lang = str((self._settings.get('tts', {}) or {}).get('language', '')).strip()
-                    except Exception:
-                        sel_lang = ''
-                    pairs = []  # (name, lang)
-                    for line in (out or '').splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        parts = line.split()
-                        if not parts:
-                            continue
-                        name = parts[0]
-                        lang = ''
-                        try:
-                            if '#' in line:
-                                before, _after = line.split('#', 1)
-                                tokens = before.split()
-                                if len(tokens) >= 2:
-                                    lang = tokens[1].strip()
-                            elif len(parts) >= 2:
-                                lang = parts[1].strip()
-                        except Exception:
-                            pass
-                        pairs.append((name, lang))
-                    if pairs:
-                        if sel_lang:
-                            pairs = [p for p in pairs if p[1].lower() == sel_lang.lower()]
-                        names = [p[0] for p in pairs]
-                        if names:
-                            return names
-                except Exception:
-                    pass
-            # Windows: PowerShell System.Speech voices
-            if sys.platform.startswith('win'):
-                try:
-                    ps = (
-                        "Add-Type -AssemblyName System.Speech;"
-                        "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                        "$s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name }"
-                    )
-                    p = subprocess.Popen(["powershell", "-NoProfile", "-Command", ps], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                    out, _ = p.communicate(timeout=3)
-                    names = [ln.strip() for ln in (out or '').splitlines() if ln.strip()]
-                    if names:
-                        return names
-                except Exception:
-                    pass
-            # Linux: espeak --voices
-            try:
-                p = subprocess.Popen(["espeak", "--voices"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                out, _ = p.communicate(timeout=3)
-                names = []
-                for line in (out or '').splitlines():
-                    if not line or line.lower().startswith("pty ") or line.lower().startswith("\n"):
-                        continue
-                    parts = line.split()
-                    if len(parts) >= 5:
-                        # Voice name is usually the last column
-                        names.append(parts[-1])
-                if names:
-                    # Remove header lines and dups
-                    names = [n for n in names if n.lower() != 'voice']
-                    seen = set()
-                    out = []
-                    for n in names:
-                        if n not in seen:
-                            seen.add(n)
-                            out.append(n)
-                    return out
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return ["Default"]
-
-    # Build the Choose Voice… popup menu with Eloquence grouping and language filtering (macOS)
     def _on_tts_choose_voice(self, evt):
+        menu = wx.Menu()
         try:
-            menu = wx.Menu()
-            # Default option
-            id_def = wx.NewIdRef()
-            item_def = menu.Append(id_def, "Default", kind=wx.ITEM_RADIO)
-            try:
-                item_def.Check((self._last_tts_voice or 'Default').lower() == 'default')
-            except Exception:
-                pass
-            self.Bind(wx.EVT_MENU, lambda e, name='Default': self._set_tts_voice(name), id=id_def)
+            self._populate_speech_voices(menu, self._speech_settings(), self._set_tts_voice)
+            self.PopupMenu(menu)
+        finally:
+            menu.Destroy()
 
-            # Detailed voices
-            voices = self._tts_list_voices_detailed()
-            # Separate Eloquence vs others
-            elo = [v for v in voices if v.get('eloquence')]
-            oth = [v for v in voices if not v.get('eloquence')]
+    def _speech_settings(self):
+        return {
+            'voice': self._last_tts_voice,
+            'language': self._settings.get('tts', {}).get('language', ''),
+        }
 
-            # Eloquence grouped by language
-            if elo:
-                sub = wx.Menu()
-                groups = {}
-                for v in elo:
-                    lang = (v.get('lang') or '').strip() or 'Other'
-                    groups.setdefault(lang, []).append(v)
+    def _set_tts_voice(self, name, lang=None):
+        self._last_tts_voice = str(name or 'Default')
+        if lang is not None:
+            self._settings.setdefault('tts', {})['language'] = lang
+            self._select_tts_language(lang)
+        self._update_tts_voice_label()
 
-                def sort_key(k: str):
-                    k_l = k.lower()
-                    if k_l == 'en_us':
-                        return (0, k)
-                    if k_l == 'en_gb':
-                        return (1, k)
-                    return (2, k)
+    def _update_tts_voice_label(self):
+        language = self._settings.get('tts', {}).get('language', '')
+        label = self._last_tts_voice
+        if language:
+            label += f" ({self._friendly_lang_label(language)})"
+        self.txt_tts_voice.SetLabel(label)
+        self.btn_tts_choose.SetName(f"Choose voice, current voice: {label}")
+        self.Layout()
 
-                for lang in sorted(groups.keys(), key=sort_key):
-                    sm = wx.Menu()
-                    for v in groups[lang]:
-                        name = v.get('name') or ''
-                        if not name:
-                            continue
-                        vid = wx.NewIdRef()
-                        item = sm.Append(vid, name, kind=wx.ITEM_RADIO)
-                        try:
-                            current_lang = str(
-                                (self._settings.get('tts', {}) or {}).get('language', '') or ''
-                            )
-                            selected_lang = '' if lang == 'Other' else lang
-                            item.Check(
-                                self._last_tts_voice == name and current_lang == selected_lang
-                            )
-                        except Exception:
-                            pass
-                        voice_lang = None if lang == 'Other' else lang
-                        self.Bind(
-                            wx.EVT_MENU,
-                            lambda e, nm=name, selected_lang=voice_lang: (
-                                self._set_tts_voice(nm, selected_lang)
-                            ),
-                            id=vid,
-                        )
-                    sub_label = self._friendly_lang_label(lang) if lang != 'Other' else 'Other'
-                    sub.AppendSubMenu(sm, sub_label)
-                menu.AppendSubMenu(sub, "Eloquence")
+    def _select_tts_language(self, language):
+        if language not in self._tts_languages:
+            self._tts_languages.append(language)
+            self.choice_tts_language.Append(self._friendly_lang_label(language))
+        self.choice_tts_language.SetSelection(self._tts_languages.index(language))
 
-            for v in oth:
-                name = v.get('name') or ''
-                if not name:
-                    continue
-                vid = wx.NewIdRef()
-                item = menu.Append(vid, name, kind=wx.ITEM_RADIO)
-                try:
-                    item.Check(self._last_tts_voice == name)
-                except Exception:
-                    pass
-                self.Bind(wx.EVT_MENU, lambda e, nm=name: self._set_tts_voice(nm, None), id=vid)
-
-            # Popup near the button
-            try:
-                btn = self.btn_tts_choose
-                pos = btn.ClientToScreen((0, btn.GetSize().height))
-                self.PopupMenu(menu, self.ScreenToClient(pos))
-            finally:
-                menu.Destroy()
-        except Exception:
-            pass
-
-    def _set_tts_voice(self, name: str, lang: str | None = None):
-        try:
-            self._last_tts_voice = str(name or 'Default')
-            if hasattr(self, 'txt_tts_voice') and self.txt_tts_voice:
-                self.txt_tts_voice.SetLabel(self._last_tts_voice)
-            # Update language preference for macOS grouping
-            if lang is not None:
-                try:
-                    self._settings.setdefault('tts', {})['language'] = str(lang or '')
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    def _tts_list_voices_detailed(self) -> list[dict]:
-        out = []
-        try:
-            import sys
-            import subprocess
-            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
-                for voice in MacSpeechBackend().available_voices():
-                    nm = str(voice.get('name') or 'Voice')
-                    out.append({
-                        'name': nm,
-                        'lang': str(voice.get('lang') or ''),
-                        'desc': str(voice.get('desc') or ''),
-                        'eloquence': nm.lower() in {'eddy','flo','grandma','grandpa','reed','rocko','sandy','shelley','shelly','glen','glenn'},
-                    })
-            elif sys.platform == 'darwin':
-                p = subprocess.Popen(["say", "-v", "?"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                txt, _ = p.communicate(timeout=3)
-                for ln in (txt or '').splitlines():
-                    ln = ln.strip()
-                    if not ln:
-                        continue
-                    parts = ln.split()
-                    if not parts:
-                        continue
-                    name = parts[0]
-                    lang = ''
-                    desc = ''
-                    try:
-                        if '#' in ln:
-                            before, after = ln.split('#', 1)
-                            desc = after.strip()
-                            tokens = before.split()
-                            if len(tokens) >= 2:
-                                lang = tokens[1].strip()
-                        elif len(parts) >= 2:
-                            lang = parts[1].strip()
-                    except Exception:
-                        pass
-                    nm = str(name)
-                    elo = ('eloquence' in desc.lower()) or nm.lower() in {'eddy','flo','grandma','grandpa','reed','rocko','sandy','shelley','shelly','glen','glenn'}
-                    if elo and (not lang or lang.lower() in ('en', 'english')):
-                        inferred = self._infer_lang_from_text(ln + ' ' + desc)
-                        if inferred:
-                            lang = inferred
-                    out.append({'name': nm, 'lang': lang, 'desc': desc, 'eloquence': elo})
-            else:
-                # Fallback to simple names via existing helper
-                names = self._tts_get_voices() or []
-                for nm in names:
-                    elo = nm.lower() in {'eddy','flo','grandma','grandpa','reed','rocko','sandy','shelley','shelly','glen','glenn'}
-                    out.append({'name': nm, 'lang': '', 'desc': '', 'eloquence': elo})
-        except Exception:
-            pass
-        # Dedup by (name, lang)
-        seen = set()
-        dedup = []
-        for v in out:
-            key = (v.get('name'), v.get('lang') or '')
-            if key in seen:
-                continue
-            seen.add(key)
-            dedup.append(v)
-        return dedup
-
-    def _friendly_lang_label(self, code: str) -> str:
-        try:
-            c = (code or '').strip()
-            if not c:
-                return 'All Languages'
-            c_norm = c.replace('-', '_')
-            parts = c_norm.split('_', 1)
-            lang = parts[0].lower()
-            region = (parts[1].upper() if len(parts) > 1 else '')
-            lang_names = {
-                'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German', 'it': 'Italian',
-                'pt': 'Portuguese', 'nl': 'Dutch', 'sv': 'Swedish', 'no': 'Norwegian', 'da': 'Danish',
-                'fi': 'Finnish', 'is': 'Icelandic', 'pl': 'Polish', 'cs': 'Czech', 'sk': 'Slovak',
-                'hu': 'Hungarian', 'ro': 'Romanian', 'bg': 'Bulgarian', 'ru': 'Russian', 'uk': 'Ukrainian',
-                'tr': 'Turkish', 'el': 'Greek', 'he': 'Hebrew', 'ar': 'Arabic', 'hi': 'Hindi',
-                'th': 'Thai', 'vi': 'Vietnamese', 'id': 'Indonesian', 'ms': 'Malay', 'zh': 'Chinese',
-                'ja': 'Japanese', 'ko': 'Korean'
-            }
-            region_names = {
-                'US': 'US', 'GB': 'UK', 'AU': 'Australia', 'CA': 'Canada', 'IN': 'India', 'ZA': 'South Africa',
-                'ES': 'Spain', 'MX': 'Mexico', 'BR': 'Brazil', 'PT': 'Portugal', 'FR': 'France', 'DE': 'Germany',
-                'IT': 'Italy', 'NL': 'Netherlands', 'SE': 'Sweden', 'NO': 'Norway', 'DK': 'Denmark', 'FI': 'Finland',
-                'IS': 'Iceland', 'PL': 'Poland', 'CZ': 'Czechia', 'SK': 'Slovakia', 'HU': 'Hungary', 'RO': 'Romania',
-                'BG': 'Bulgaria', 'RU': 'Russia', 'UA': 'Ukraine', 'TR': 'Turkey', 'GR': 'Greece', 'IL': 'Israel',
-                'SA': 'Saudi Arabia', 'TH': 'Thailand', 'VN': 'Vietnam', 'ID': 'Indonesia', 'MY': 'Malaysia',
-                'CN': 'China', 'TW': 'Taiwan', 'HK': 'Hong Kong', 'JP': 'Japan', 'KR': 'Korea'
-            }
-            lang_label = lang_names.get(lang, c.upper())
-            if region:
-                reg_label = region_names.get(region, region)
-                return f"{lang_label} ({reg_label})"
-            return lang_label
-        except Exception:
-            return code or 'All Languages'
-
-    def _infer_lang_from_text(self, text: str) -> str | None:
-        try:
-            t = (text or '').lower()
-            if 'en_us' in t or 'en-us' in t or 'enus' in t:
-                return 'en_US'
-            if 'en_gb' in t or 'en-gb' in t or 'engb' in t or 'uk english' in t:
-                return 'en_GB'
-        except Exception:
-            pass
-        return None
-
-    def _on_refresh_voices(self, evt):
-        try:
-            voices = self._tts_get_voices() or ["Default"]
-            self.choice_tts_voice.Set([str(v) for v in voices])
-            # Try to keep existing selection
-            cur = getattr(self, 'choice_tts_voice', None)
-            if cur:
-                want = getattr(self, '_last_tts_voice', None) or 'Default'
-                if want in voices:
-                    self.choice_tts_voice.SetSelection(max(0, voices.index(want)))
-                else:
-                    self.choice_tts_voice.SetSelection(0)
-        except Exception:
-            pass
+    def _on_tts_language(self, evt):
+        language = self._tts_languages[self.choice_tts_language.GetSelection()]
+        self._settings.setdefault('tts', {})['language'] = language
+        self._update_tts_voice_label()
 
     def _browse(self, target_ctrl):
         with wx.FileDialog(self, message="Choose a sound file",
@@ -890,167 +611,12 @@ class PreferencesDialog(wx.Dialog):
     def _test_notice(self, evt):
         self._test_sound(self.txt_sound_notice, "Notice sound")
 
-    # --- TTS preview ---
-    def _tts_map_rate(self, wpm: int) -> int:
-        try:
-            wpm = int(wpm)
-        except Exception:
-            wpm = 180
-        baseline = 180.0
-        # Map 60..600 wpm to roughly -10..10, clamp
-        rel = (wpm - baseline) / (600.0 - 60.0)
-        rate = int(round(rel * 20))
-        if rate < -10:
-            rate = -10
-        if rate > 10:
-            rate = 10
-        return rate
-
     def _on_tts_test(self, evt):
-        try:
-            sample = "This is a test of text to speech."
-            voiceover_requested = sys.platform == 'darwin' and self.chk_tts_voiceover.GetValue()
-            if voiceover_requested and self._tts_test_via_voiceover(sample):
-                return
-            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
-                backend = getattr(self, '_tts_av_test_backend', None)
-                if backend is None:
-                    backend = MacSpeechBackend()
-                    self._tts_av_test_backend = backend
-                backend.stop()
-                if backend.speak(
-                    sample,
-                    voice_name=(getattr(self, '_last_tts_voice', '') or 'Default').strip(),
-                    language=str((self._settings.get('tts', {}) or {}).get('language', '')),
-                    rate_wpm=int(self.spin_tts_wpm.GetValue()),
-                ):
-                    return
-            if self._tts_prefer_process_backend():
-                cmd = self._tts_build_process_command(sample)
-                if cmd:
-                    try:
-                        import subprocess
-                        subprocess.Popen(cmd)
-                        return
-                    except Exception:
-                        pass
-            TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
-            if TTS is not None:
-                tts = TTS()
-                # Apply voice
-                try:
-                    want = (getattr(self, '_last_tts_voice', '') or 'Default').strip()
-                    if hasattr(tts, 'GetVoices') and hasattr(tts, 'SetVoice'):
-                        voices = tts.GetVoices()
-                        chosen = None
-                        for v in voices:
-                            name = None
-                            for attr in ('GetName', 'GetDescription', 'Name'):
-                                if hasattr(v, attr):
-                                    val = getattr(v, attr)
-                                    name = val() if callable(val) else val
-                                    break
-                            if not name and isinstance(v, (list, tuple)) and v:
-                                name = str(v[0])
-                            if str(name or '').strip() == want:
-                                chosen = v
-                                break
-                        if chosen is not None:
-                            try:
-                                tts.SetVoice(chosen)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-                # Apply rate
-                try:
-                    rate_param = self._tts_map_rate(int(self.spin_tts_wpm.GetValue()))
-                    if hasattr(tts, 'SetRate'):
-                        tts.SetRate(rate_param)
-                except Exception:
-                    pass
-                # Speak sample
-                try:
-                    if hasattr(tts, 'Speak'):
-                        tts.Speak(sample)
-                        return
-                except Exception:
-                    pass
-            # Fallback if wx TTS unavailable or failed
-            try:
-                import subprocess
-                cmd = self._tts_build_process_command(sample)
-                if cmd:
-                    subprocess.Popen(cmd)
-                    return
-                subprocess.Popen(["spd-say", sample])
-                return
-            except Exception:
-                pass
-            wx.MessageBox("Text-to-speech engine not available.", "TTS", wx.OK | wx.ICON_WARNING)
-        except Exception as e:
-            wx.MessageBox(f"TTS error: {e}", "TTS", wx.OK | wx.ICON_ERROR)
+        self._speech_preview.speak(self.values['tts'])
 
-    def _tts_test_via_voiceover(self, text: str) -> bool:
-        try:
-            import subprocess
-            safe = (text or "").replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
-            script = (
-                'var vo = Application("/System/Library/CoreServices/VoiceOver.app");\n'
-                f'vo.output("{safe}");\n'
-            )
-            proc = subprocess.run(
-                ["osascript", "-l", "JavaScript", "-"],
-                input=script,
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            return proc.returncode == 0
-        except Exception:
-            return False
-
-    def _tts_prefer_process_backend(self) -> bool:
-        try:
-            import sys
-            voice = (getattr(self, '_last_tts_voice', '') or 'Default').strip()
-            language = str((self._settings.get('tts', {}) or {}).get('language', '') or '').strip()
-            if sys.platform == 'darwin':
-                return True
-            return voice.lower() != 'default' or bool(language)
-        except Exception:
-            return False
-
-    def _tts_build_process_command(self, text: str) -> list[str] | None:
-        try:
-            import sys
-            voice = (getattr(self, '_last_tts_voice', '') or 'Default').strip()
-            wpm = int(self.spin_tts_wpm.GetValue())
-            if sys.platform == 'darwin':
-                cmd = ["say"]
-                if voice and voice.lower() != 'default':
-                    cmd += ["-v", voice]
-                cmd += ["-r", str(max(80, min(600, wpm))), text]
-                return cmd
-            if sys.platform.startswith('win'):
-                rate = self._tts_map_rate(wpm)
-                ps = (
-                    "$t='" + text.replace("'","''") + "';"
-                    "Add-Type -AssemblyName System.Speech;"
-                    "$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
-                    f"$s.Rate={rate};"
-                )
-                if voice and voice.lower() != 'default':
-                    ps += f"try{{$s.SelectVoice('{voice}')}}catch{{}};"
-                ps += "$s.Speak($t);"
-                return ["powershell", "-NoProfile", "-Command", ps]
-            cmd = ["espeak", f"-s{max(80, min(600, wpm))}"]
-            if voice and voice.lower() != 'default':
-                cmd += ["-v", voice]
-            cmd.append(text)
-            return cmd
-        except Exception:
-            return None
+    def Destroy(self):
+        self._speech_preview.stop()
+        return super().Destroy()
 
     @property
     def values(self):
@@ -1100,7 +666,7 @@ class PreferencesDialog(wx.Dialog):
                 'enabled': self.chk_tts_enabled.GetValue(),
                 'interrupt': self.chk_tts_interrupt.GetValue(),
                 'voice': (getattr(self, '_last_tts_voice', '') or 'Default').strip(),
-                # Preserve language preference chosen via macOS Speech menu
+                # Use the dialog-local language until OK is pressed
                 'language': str((self._settings.get('tts', {}) or {}).get('language', '')),
                 'rate_wpm': int(self.spin_tts_wpm.GetValue()),
                 'use_voiceover': self.chk_tts_voiceover.GetValue(),

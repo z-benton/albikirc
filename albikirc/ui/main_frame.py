@@ -5,19 +5,23 @@ from collections import deque
 import wx
 import wx.adv
 
+from .speech_controls import (
+    MAX_SPEECH_RATE, MIN_SPEECH_RATE, SPEECH_EVENTS, SpeechChoicesMixin,
+)
 from .chat_panel import ChatPanel
 from ..irc_client import IRCClient
 from ..config import save, _default_sound_path
 from ..mac_speech import MacSpeechBackend
 from .connect_dialog import ConnectDialog
 from .preferences_dialog import PreferencesDialog
+from .speech_preview import SpeechPreview
 from .saved_servers_dialog import SavedServersDialog
 from .help_dialog import HelpDialog
 from .channel_list_dialog import ChannelListDialog
 from ..event_bus import event_bus
 
 
-class MainFrame(wx.Frame):
+class MainFrame(SpeechChoicesMixin, wx.Frame):
     def __init__(self, *args, settings=None, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -39,6 +43,7 @@ class MainFrame(wx.Frame):
 
         # Experimental beeps
         self._beeps_enabled = bool(self.settings.get('beeps', {}).get('enabled', False))
+        self._speech_preview = SpeechPreview()
         self._tts_proc = None
         self._tts_av = None
         self._tts_queue = deque()
@@ -246,409 +251,103 @@ class MainFrame(wx.Frame):
 
         self.SetMenuBar(menubar)
 
-    # --- Speech menu construction (macOS preferred) ---
-    def _build_menu_speech(self) -> wx.Menu | None:
-        try:
-            import sys
-            # Build on all platforms, but language submenu is mac-only
-            m = wx.Menu()
-
-            # IDs and state
-            self.ID_TTS_ENABLE = getattr(self, 'ID_TTS_ENABLE', wx.NewIdRef())
-            self._tts_voice_ids = {}
-            self._tts_lang_ids = {}
-
-            # Enable toggle
-            item_enable = m.Append(self.ID_TTS_ENABLE, "&Enable Text-to-Speech", kind=wx.ITEM_CHECK)
-            cfg = self._get_tts_cfg()
-            try:
-                item_enable.Check(bool(cfg.get('enabled', False)))
-            except Exception:
-                pass
-            self.Bind(wx.EVT_MENU, self._on_tts_toggle_enable, id=self.ID_TTS_ENABLE)
-
-            # Voice submenu
-            voices_menu = wx.Menu()
-            m.AppendSubMenu(voices_menu, "&Voice")
-            self._populate_voice_submenu(voices_menu)
-
-            # Language submenu (macOS only)
-            if sys.platform == 'darwin':
-                lang_menu = wx.Menu()
-                m.AppendSubMenu(lang_menu, "&Language")
-                self._populate_language_submenu(lang_menu)
-
-            return m
-        except Exception:
-            return None
-
-    def _populate_voice_submenu(self, voices_menu: wx.Menu):
-        try:
-            # Clear previous
-            while True:
-                item = voices_menu.FindItemByPosition(0)
-                if not item:
-                    break
-                voices_menu.Delete(item.GetId())
-        except Exception:
-            pass
-        self._tts_voice_ids = {}
+    # --- Speech menu ---
+    def _build_menu_speech(self):
         cfg = self._get_tts_cfg()
-        current_voice = str(cfg.get('voice', 'Default'))
-        current_lang = str(cfg.get('language', '') or '')
+        menu = wx.Menu()
+        enabled = menu.Append(wx.ID_ANY, "&Enable text-to-speech", kind=wx.ITEM_CHECK)
+        enabled.Check(cfg['enabled'])
+        menu.Bind(wx.EVT_MENU, self._on_tts_toggle_enable, id=enabled.GetId())
 
-        # Always include Default
-        id_default = wx.NewIdRef()
-        self._tts_voice_ids['Default'] = id_default
-        item_def = voices_menu.Append(id_default, "&Default", kind=wx.ITEM_RADIO)
-        try:
-            item_def.Check(current_voice.lower() == 'default')
-        except Exception:
-            pass
-        self.Bind(wx.EVT_MENU, lambda evt, name='Default': self._on_tts_select_voice(name), id=id_default)
+        languages = wx.Menu()
+        self._populate_speech_languages(languages, cfg, self._on_tts_select_language)
+        menu.AppendSubMenu(languages, "&Language")
+        voices = wx.Menu()
+        self._populate_speech_voices(voices, cfg, self._on_tts_select_voice)
+        menu.AppendSubMenu(voices, "&Voice")
+        rate = menu.Append(wx.ID_ANY, "Speaking &rate…")
+        menu.Bind(wx.EVT_MENU, self._on_tts_rate, id=rate.GetId())
+        test = menu.Append(wx.ID_ANY, "&Test speech")
+        menu.Bind(wx.EVT_MENU, self._on_tts_test, id=test.GetId())
+        menu.AppendSeparator()
+        events = wx.Menu()
+        for key, label in SPEECH_EVENTS:
+            item = events.Append(wx.ID_ANY, label, kind=wx.ITEM_CHECK)
+            item.Check(cfg['events'][key])
+            events.Bind(wx.EVT_MENU, lambda evt, name=key: self._set_speech_setting(
+                name, evt.IsChecked(), event=True
+            ), id=item.GetId())
+        menu.AppendSubMenu(events, "&Speak")
+        interrupt = menu.Append(
+            wx.ID_ANY, "&Interrupt speech with newer messages", kind=wx.ITEM_CHECK
+        )
+        interrupt.Check(cfg['interrupt'])
+        menu.Bind(wx.EVT_MENU, lambda evt: self._set_speech_setting(
+            'interrupt', evt.IsChecked()
+        ), id=interrupt.GetId())
+        menu.AppendSeparator()
+        preferences = menu.Append(wx.ID_ANY, "Speech &preferences…")
+        menu.Bind(wx.EVT_MENU, lambda evt: self._on_preferences(
+            evt, speech_page=True
+        ), id=preferences.GetId())
+        return menu
 
-        # Get voices with metadata (mac: name, lang, desc, eloquence)
-        voices = self._list_voices_detailed()
-        sel_lang = (cfg.get('language') or '').strip()
+    def _refresh_speech_menu(self):
+        if not self:
+            return
+        bar = self.GetMenuBar()
+        if bar is None:
+            return
+        for index in range(bar.GetMenuCount()):
+            if bar.GetMenuLabelText(index).lower() == 'speech':
+                old_menu = bar.Replace(index, self._build_menu_speech(), "&Speech")
+                # wx on macOS can lose the title during Replace.
+                bar.SetMenuLabel(index, "&Speech")
+                if old_menu:
+                    old_menu.Destroy()
+                break
 
-        # Group eloquence/non-eloquence
-        eloquence = [v for v in voices if v.get('eloquence')]
-        others = [v for v in voices if not v.get('eloquence')]
-
-        # Optional Eloquence submenu grouped by language (do not filter by selected language)
-        if eloquence:
-            sub = wx.Menu()
-            # Group by language code
-            groups: dict[str, list[dict]] = {}
-            for v in eloquence:
-                lang = (v.get('lang') or '').strip() or 'Other'
-                groups.setdefault(lang, []).append(v)
-            # Order with en_US, en_GB first when present
-            def sort_key(k: str):
-                k_l = k.lower()
-                if k_l == 'en_us':
-                    return (0, k)
-                if k_l == 'en_gb':
-                    return (1, k)
-                return (2, k)
-            for lang in sorted(groups.keys(), key=sort_key):
-                vs = groups[lang]
-                sm = wx.Menu()
-                for v in vs:
-                    nm = v.get('name') or ''
-                    if not nm:
-                        continue
-                    vid = wx.NewIdRef()
-                    # key for internal map: name|lang to avoid collisions
-                    self._tts_voice_ids[f"{nm}|{lang}"] = vid
-                    label = nm
-                    item = sm.Append(vid, label, kind=wx.ITEM_RADIO)
-                    try:
-                        # Check if this entry matches current selection
-                        item.Check(current_voice == nm and current_lang == ('' if lang == 'Other' else lang))
-                    except Exception:
-                        pass
-                    selected_lang = None if lang == 'Other' else lang
-                    self.Bind(
-                        wx.EVT_MENU,
-                        lambda evt, name=nm, voice_lang=selected_lang: (
-                            self._on_tts_select_voice(name, voice_lang)
-                        ),
-                        id=vid,
-                    )
-                # Label the language submenu (user-friendly)
-                sub_label = self._friendly_lang_label(lang) if lang != 'Other' else 'Other'
-                sub.AppendSubMenu(sm, sub_label)
-            voices_menu.AppendSubMenu(sub, "&Eloquence")
-
-        # The remaining voices
-        # Apply selected language filter to non-Eloquence voices for brevity
-        filtered_others = [v for v in others if (not sel_lang) or (str(v.get('lang','')).lower() == sel_lang.lower())]
-        for v in filtered_others:
-            nm = v.get('name') or ''
-            if not nm:
-                continue
-            vid = wx.NewIdRef()
-            self._tts_voice_ids[nm] = vid
-            item = voices_menu.Append(vid, nm, kind=wx.ITEM_RADIO)
-            try:
-                item.Check(current_voice == nm)
-            except Exception:
-                pass
-            self.Bind(wx.EVT_MENU, lambda evt, name=nm: self._on_tts_select_voice(name, None), id=vid)
-
-    def _populate_language_submenu(self, lang_menu: wx.Menu):
-        try:
-            # Clear previous
-            while True:
-                item = lang_menu.FindItemByPosition(0)
-                if not item:
-                    break
-                lang_menu.Delete(item.GetId())
-        except Exception:
-            pass
-        self._tts_lang_ids = {}
-        cfg = self._get_tts_cfg()
-        sel = (cfg.get('language') or '').strip()
-
-        # Collect languages from voice list
-        voices = self._list_voices_detailed()
-        langs = []
-        seen = set()
-        for v in voices:
-            lang = (v.get('lang') or '').strip()
-            if not lang or lang in seen:
-                continue
-            seen.add(lang)
-            langs.append(lang)
-        langs.sort()
-
-        # All languages option
-        id_all = wx.NewIdRef()
-        self._tts_lang_ids[''] = id_all
-        item_all = lang_menu.Append(id_all, "&All Languages", kind=wx.ITEM_RADIO)
-        try:
-            item_all.Check(sel == '')
-        except Exception:
-            pass
-        self.Bind(wx.EVT_MENU, lambda evt, code='': self._on_tts_select_language(code), id=id_all)
-
-        # Add each language
-        for code in langs:
-            lid = wx.NewIdRef()
-            self._tts_lang_ids[code] = lid
-            label = self._friendly_lang_label(code)
-            item = lang_menu.Append(lid, label, kind=wx.ITEM_RADIO)
-            try:
-                item.Check(sel.lower() == code.lower())
-            except Exception:
-                pass
-            self.Bind(wx.EVT_MENU, lambda evt, c=code: self._on_tts_select_language(c), id=lid)
+    def _set_speech_setting(self, key, value, *, event=False):
+        cfg = self.settings.setdefault('tts', {})
+        target = cfg.setdefault('events', {}) if event else cfg
+        target[key] = value
+        save(self.settings)
+        self._tts_init()
+        # Let the current native menu event finish before replacing its menu.
+        wx.CallAfter(self._refresh_speech_menu)
 
     def _on_tts_toggle_enable(self, evt):
-        try:
-            cfg = self.settings.setdefault('tts', {})
-            cfg['enabled'] = bool(evt.IsChecked())
-            save(self.settings)
-            self._tts_init()
-        except Exception:
-            pass
+        self._set_speech_setting('enabled', evt.IsChecked())
 
-    def _on_tts_select_voice(self, name: str, lang: str | None = None):
-        try:
-            cfg = self.settings.setdefault('tts', {})
-            cfg['voice'] = str(name or 'Default')
-            if lang is not None:
-                cfg['language'] = str(lang or '')
-            save(self.settings)
-            self._tts_apply_settings()
-            # Refresh Speech menu to update checkmarks across submenus
-            bar = self.GetMenuBar()
-            if bar:
-                idx = -1
-                for i in range(bar.GetMenuCount()):
-                    if bar.GetMenuLabelText(i).lower() == 'speech':
-                        idx = i
-                        break
-                if idx >= 0:
-                    try:
-                        bar.Remove(idx)
-                    except Exception:
-                        pass
-                    new_m = self._build_menu_speech()
-                    if new_m is not None:
-                        bar.Insert(idx, new_m, "&Speech")
-                        self.SetMenuBar(bar)
-        except Exception:
-            pass
+    def _on_tts_select_voice(self, name, lang=None):
+        cfg = self.settings.setdefault('tts', {})
+        if lang is not None:
+            cfg['language'] = lang
+        self._set_speech_setting('voice', str(name or 'Default'))
 
-    def _on_tts_select_language(self, code: str):
-        try:
-            cfg = self.settings.setdefault('tts', {})
-            cfg['language'] = str(code or '')
-            save(self.settings)
-            # Rebuild voice submenu to filter by language
-            bar = self.GetMenuBar()
-            if not bar:
-                return
-            # Find our Speech menu: last before Help if present
-            # Simpler: rebuild entire Speech menu
-            idx = -1
-            for i in range(bar.GetMenuCount()):
-                if bar.GetMenuLabelText(i).lower() == 'speech':
-                    idx = i
-                    break
-            if idx >= 0:
-                try:
-                    bar.Remove(idx)
-                except Exception:
-                    pass
-                new_m = self._build_menu_speech()
-                if new_m is not None:
-                    bar.Insert(idx, new_m, "&Speech")
-                    self.SetMenuBar(bar)
-        except Exception:
-            pass
+    def _on_tts_select_language(self, code):
+        self._set_speech_setting('language', str(code or ''))
 
-    def _list_voices_detailed(self) -> list[dict]:
-        """Return a list of voice dicts: {name, lang, desc, eloquence}.
-        macOS uses `say -v ?`. Other OS return names only via wx TTS if available.
-        """
-        out = []
-        try:
-            import sys
-            if sys.platform == 'darwin' and MacSpeechBackend.is_available():
-                backend = self._tts_get_av_backend()
-                for voice in backend.available_voices():
-                    nm = str(voice.get('name') or 'Voice')
-                    lang = str(voice.get('lang') or '')
-                    desc = str(voice.get('desc') or '')
-                    out.append({'name': nm, 'lang': lang, 'desc': desc, 'eloquence': self._is_eloquence_name(nm)})
-                if out:
-                    seen = set()
-                    dedup = []
-                    for v in out:
-                        key = (v.get('name'), v.get('lang') or '')
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        dedup.append(v)
-                    return dedup
-        except Exception:
-            pass
-        try:
-            # Try wx.TextToSpeech first
-            TTS = getattr(wx, 'TextToSpeech', None) or getattr(wx.adv, 'TextToSpeech', None)
-            if TTS is not None:
-                try:
-                    tts = TTS()
-                    if hasattr(tts, 'GetVoices'):
-                        for v in (tts.GetVoices() or []):
-                            name = None
-                            for attr in ('GetName', 'GetDescription', 'Name'):
-                                if hasattr(v, attr):
-                                    val = getattr(v, attr)
-                                    name = val() if callable(val) else val
-                                    break
-                            if not name and isinstance(v, (list, tuple)) and v:
-                                name = str(v[0])
-                            nm = str(name or 'Voice')
-                            out.append({'name': nm, 'lang': '', 'desc': '', 'eloquence': self._is_eloquence_name(nm)})
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # macOS: prefer richer details from say -v ?
-        try:
-            import sys
-            import subprocess
-            if sys.platform == 'darwin':
-                p = subprocess.Popen(["say", "-v", "?"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                txt, _ = p.communicate(timeout=3)
-                out = []
-                for ln in (txt or '').splitlines():
-                    ln = ln.strip()
-                    if not ln:
-                        continue
-                    # Example: "Agnes\ten_US    # ..."
-                    parts = ln.split()
-                    if not parts:
-                        continue
-                    name = parts[0]
-                    lang = ''
-                    desc = ''
-                    try:
-                        # Language usually the next token(s) until '#'
-                        if '#' in ln:
-                            before, after = ln.split('#', 1)
-                            desc = after.strip()
-                            tokens = before.split()
-                            if len(tokens) >= 2:
-                                lang = tokens[1].strip()
-                        else:
-                            if len(parts) >= 2:
-                                lang = parts[1].strip()
-                    except Exception:
-                        pass
-                    nm = str(name)
-                    elo = (self._is_eloquence_name(nm) or ('eloquence' in desc.lower()))
-                    # Improve language detection for Eloquence voices (e.g., ENUS/ENGB hints)
-                    if elo and (not lang or lang.lower() in ('en', 'english')):
-                        inferred = self._infer_lang_from_text(ln + ' ' + desc)
-                        if inferred:
-                            lang = inferred
-                    out.append({'name': nm, 'lang': lang, 'desc': desc, 'eloquence': elo})
-        except Exception:
-            pass
-        # Deduplicate by (name, lang) preserving order
-        seen = set()
-        dedup = []
-        for v in out:
-            key = (v.get('name'), v.get('lang') or '')
-            if key in seen:
-                continue
-            seen.add(key)
-            dedup.append(v)
-        return dedup
+    def _on_tts_rate(self, evt):
+        with wx.Dialog(self, title="Speaking rate") as dialog:
+            dialog.SetName("Speaking rate dialog")
+            layout = wx.BoxSizer(wx.VERTICAL)
+            layout.Add(wx.StaticText(dialog, label="Speaking rate (words per minute):"),
+                       0, wx.ALL, 8)
+            rate = wx.SpinCtrl(
+                dialog, min=MIN_SPEECH_RATE, max=MAX_SPEECH_RATE,
+                initial=self._get_tts_cfg()['rate_wpm']
+            )
+            rate.SetName("Speaking rate (words per minute)")
+            layout.Add(rate, 0, wx.EXPAND | wx.ALL, 8)
+            layout.Add(dialog.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL, 8)
+            dialog.SetSizerAndFit(layout)
+            rate.SetFocus()
+            if dialog.ShowModal() == wx.ID_OK:
+                self._set_speech_setting('rate_wpm', rate.GetValue())
 
-    def _is_eloquence_name(self, name: str) -> bool:
-        try:
-            n = (name or '').strip().lower()
-            # Common Eloquence voices on macOS Ventura+
-            elo = {
-                'eddy','flo','grandma','grandpa','reed','rocko','sandy','shelley','shelly','glen','glenn'
-            }
-            return n in elo
-        except Exception:
-            return False
-
-    def _friendly_lang_label(self, code: str) -> str:
-        try:
-            c = (code or '').strip()
-            if not c:
-                return 'All Languages'
-            # Normalize code
-            c_norm = c.replace('-', '_')
-            parts = c_norm.split('_', 1)
-            lang = parts[0].lower()
-            region = (parts[1].upper() if len(parts) > 1 else '')
-            lang_names = {
-                'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German', 'it': 'Italian',
-                'pt': 'Portuguese', 'nl': 'Dutch', 'sv': 'Swedish', 'no': 'Norwegian', 'da': 'Danish',
-                'fi': 'Finnish', 'is': 'Icelandic', 'pl': 'Polish', 'cs': 'Czech', 'sk': 'Slovak',
-                'hu': 'Hungarian', 'ro': 'Romanian', 'bg': 'Bulgarian', 'ru': 'Russian', 'uk': 'Ukrainian',
-                'tr': 'Turkish', 'el': 'Greek', 'he': 'Hebrew', 'ar': 'Arabic', 'hi': 'Hindi',
-                'th': 'Thai', 'vi': 'Vietnamese', 'id': 'Indonesian', 'ms': 'Malay', 'zh': 'Chinese',
-                'ja': 'Japanese', 'ko': 'Korean'
-            }
-            region_names = {
-                'US': 'US', 'GB': 'UK', 'AU': 'Australia', 'CA': 'Canada', 'IN': 'India', 'ZA': 'South Africa',
-                'ES': 'Spain', 'MX': 'Mexico', 'BR': 'Brazil', 'PT': 'Portugal', 'FR': 'France', 'DE': 'Germany',
-                'IT': 'Italy', 'NL': 'Netherlands', 'SE': 'Sweden', 'NO': 'Norway', 'DK': 'Denmark', 'FI': 'Finland',
-                'IS': 'Iceland', 'PL': 'Poland', 'CZ': 'Czechia', 'SK': 'Slovakia', 'HU': 'Hungary', 'RO': 'Romania',
-                'BG': 'Bulgaria', 'RU': 'Russia', 'UA': 'Ukraine', 'TR': 'Turkey', 'GR': 'Greece', 'IL': 'Israel',
-                'SA': 'Saudi Arabia', 'TH': 'Thailand', 'VN': 'Vietnam', 'ID': 'Indonesia', 'MY': 'Malaysia',
-                'CN': 'China', 'TW': 'Taiwan', 'HK': 'Hong Kong', 'JP': 'Japan', 'KR': 'Korea'
-            }
-            lang_label = lang_names.get(lang, c.upper())
-            if region:
-                reg_label = region_names.get(region, region)
-                return f"{lang_label} ({reg_label})"
-            return lang_label
-        except Exception:
-            return code or 'All Languages'
-
-    def _infer_lang_from_text(self, text: str) -> str | None:
-        try:
-            t = (text or '').lower()
-            # Look for common encodings of region
-            if 'en_us' in t or 'en-us' in t or 'enus' in t:
-                return 'en_US'
-            if 'en_gb' in t or 'en-gb' in t or 'engb' in t or 'uk english' in t:
-                return 'en_GB'
-        except Exception:
-            pass
-        return None
+    def _on_tts_test(self, evt):
+        self._speech_preview.speak(self._get_tts_cfg())
 
     def _infer_lang_from_object(self, v) -> str | None:
         try:
@@ -921,8 +620,8 @@ class MainFrame(wx.Frame):
             self.notebook.DeletePage(idx)
             self._rebuild_tab_index_map()
 
-    def _on_preferences(self, evt):
-        dlg = PreferencesDialog(self, self.settings)
+    def _on_preferences(self, evt, *, speech_page=False):
+        dlg = PreferencesDialog(self, self.settings, speech_page=speech_page)
         if dlg.ShowModal() == wx.ID_OK:
             vals = dlg.values
             self.settings['nick'] = vals.get('nick', self.settings.get('nick',''))
@@ -957,6 +656,7 @@ class MainFrame(wx.Frame):
             self._beeps_enabled = bool(self.settings.get('beeps', {}).get('enabled', False))
             # TTS
             self._tts_init()
+            self._refresh_speech_menu()
             # Apply appearance to all tabs
             app_cfg = self.settings.get('appearance', {})
             self._theme = (app_cfg.get('theme') or 'system').lower()
@@ -1996,6 +1696,7 @@ class MainFrame(wx.Frame):
             pass
 
     def Destroy(self):
+        self._speech_preview.stop()
         try:
             self._unbind_events()
             # Save window geometry and open tabs
